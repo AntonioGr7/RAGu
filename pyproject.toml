@@ -1,0 +1,75 @@
+[project]
+name = "ragu"
+version = "0.0.1"
+description = "A SOTA two-level RAG system: hybrid retrieval (L1) selects a working set, an agentic RLM (L2) reasons over it."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "lancedb>=0.16",
+    "openai>=2.0",  # generic OpenAI-compatible chat client (also fronts local/Anthropic-compat servers)
+    "tiktoken>=0.8",
+]
+
+[project.optional-dependencies]
+# Embeddings via Voyage. Optional so dev/tests run on the deterministic fake embedder.
+voyage = ["voyageai>=0.3"]
+# Gemini chat/embeddings provider.
+gemini = ["google-genai>=1.0"]
+# PP-OCRv6 OCR ingestion for images/PDFs (PaddleOCR 3.x).
+# The paddle *runtime* is deliberately NOT here: choose CPU or GPU explicitly.
+ocr = ["paddleocr>=3.0", "pymupdf>=1.24", "pillow>=10"]
+# CPU runtime (PyPI wheel).
+ocr-cpu = ["paddlepaddle>=3.0"]
+# GPU runtime is NOT installable from PyPI — install paddlepaddle-gpu from
+# Paddle's CUDA index matching your toolkit, e.g. for CUDA 12.6:
+#   uv pip uninstall paddlepaddle
+#   uv pip install paddlepaddle-gpu --index https://www.paddlepaddle.org.cn/packages/stable/cu126/
+# then set RAGU_OCR__DEVICE=gpu:0
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+ragu = "ragu.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ragu"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "ANN", "TID"]
+ignore = ["ANN401"]  # allow Any in deliberate boundary spots
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN"]
+# LanceDB/pyarrow expose no stable type stubs; helpers here pass through their
+# dynamic objects, so annotation rules add noise without value.
+"src/ragu/adapters/storage/lance.py" = ["ANN001", "ANN202"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
