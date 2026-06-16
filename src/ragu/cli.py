@@ -11,19 +11,43 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 
 from ragu.app import Ragu
 
 
 def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # Chatty third-party libraries log every model file fetch / HTTP request at
+    # INFO, which drowns out RAGu's own output. Lift them to WARNING.
+    for noisy in ("httpx", "httpcore", "sentence_transformers", "transformers",
+                  "huggingface_hub", "paddlex", "paddle", "urllib3", "filelock"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    # Load .env into the process environment so provider SDKs (Gemini/OpenAI)
+    # see their API keys. pydantic-settings reads .env for RAGU_* but does not
+    # export non-prefixed keys to os.environ.
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except ImportError:  # pragma: no cover - dotenv is a normal dependency
+        pass
     parser = argparse.ArgumentParser(prog="ragu", description="Two-level RAG system")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_index = sub.add_parser("index", help="ingest and index files or folders")
     p_index.add_argument("paths", nargs="+", help="files or directories to index")
+    p_index.add_argument(
+        "--no-prune",
+        action="store_true",
+        help="keep documents whose source file has been deleted (default: prune them)",
+    )
 
     p_retrieve = sub.add_parser("retrieve", help="L1 retrieve a working set for a query")
     p_retrieve.add_argument("query", help="the query text")
+
+    p_answer = sub.add_parser("answer", help="L1+L2: reason over the working set (needs vomero)")
+    p_answer.add_argument("query", help="the query text")
 
     p_extract = sub.add_parser(
         "extract", help="extract text (incl. OCR) from a folder into another folder"
@@ -34,8 +58,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "index":
-        n = asyncio.run(Ragu().index_paths(args.paths))
-        print(f"Indexed {n} chunks from {len(args.paths)} path(s).")
+        report = asyncio.run(
+            Ragu().index_paths(args.paths, prune=not args.no_prune, progress=True)
+        )
+        print(
+            f"Indexed {report.chunks} chunks "
+            f"(new={report.new}, updated={report.updated}, "
+            f"skipped={report.skipped}, pruned={report.pruned})."
+        )
         return 0
 
     if args.command == "retrieve":
@@ -46,6 +76,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {doc.id}  [{doc.source}]")
         return 0
 
+    if args.command == "answer":
+        answer = asyncio.run(Ragu().answer(args.query))
+        print(answer.text)
+        if answer.citations:
+            print("\nSources:")
+            for c in answer.citations:
+                print(f"  - {c.doc_id}  [{c.source}]")
+        print(f"\n(trace: {answer.trace})")
+        return 0
+
     if args.command == "extract":
         # Extraction needs only ingestion + OCR — skip the full facade (no
         # embedder / vector store / LLM are constructed).
@@ -53,8 +93,15 @@ def main(argv: list[str] | None = None) -> int:
         from ragu.config import RaguSettings
         from ragu.factory import build_ocr_engine
 
-        ocr = build_ocr_engine(RaguSettings())
-        documents = load_paths(args.paths, ocr=ocr)
+        settings = RaguSettings()
+        documents = load_paths(
+            args.paths,
+            ocr=build_ocr_engine(settings),
+            pdf_mode=settings.ocr.pdf_mode,
+            pdf_dpi=settings.ocr.pdf_dpi,
+            pdf_min_text_chars=settings.ocr.pdf_min_text_chars,
+            progress=True,
+        )
         n = dump_documents(documents, args.out)
         print(f"Extracted {n} file(s) into {args.out}")
         return 0

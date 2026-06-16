@@ -27,10 +27,27 @@ class LLMSettings(BaseModel):
 
 
 class EmbeddingSettings(BaseModel):
-    provider: str = "fake"  # "voyage" | "fake" (deterministic, for dev/tests)
-    model: str = "voyage-3"
-    dim: int = 1024
-    batch_size: int = 128
+    # "local" (sentence-transformers, runs offline/on-GPU), "voyage" (hosted),
+    # "fake" (deterministic, for dev/tests).
+    provider: str = "local"
+    # Default: a small, strong, multilingual model that fits a modest GPU.
+    model: str = "intfloat/multilingual-e5-small"
+    # dim is informational for hosted providers; the local provider reports the
+    # model's true dimension regardless of this value.
+    dim: int = 384
+    batch_size: int = 64
+    device: str = "cpu"  # "cpu" or "cuda" / "cuda:0" for the local provider
+    normalize: bool = True
+    # Asymmetric retrieval prefixes. E5 models expect "query:"/"passage:"; set
+    # both empty for models that don't use instructions (e.g. BGE-M3).
+    query_prefix: str = "query: "
+    document_prefix: str = "passage: "
+    # Alternatively use a model's own registered sentence-transformers prompts
+    # (correct for Snowflake Arctic). When set, the matching prefix is ignored.
+    query_prompt_name: str | None = None
+    document_prompt_name: str | None = None
+    # Needed by models shipping custom code (e.g. Arctic v2.0 / GTE-multilingual).
+    trust_remote_code: bool = False
 
 
 class ChunkingSettings(BaseModel):
@@ -73,11 +90,21 @@ class OcrSettings(BaseModel):
     # paddlepaddle 3.x oneDNN CPU path crashes on PP-OCRv6 detection; keep off.
     # (Ignored on GPU.)
     enable_mkldnn: bool = False
-    # Max image side length fed to detection. The main VRAM lever on small GPUs:
-    # lower it (e.g. 960 → 736) if detection OOMs. None = PaddleOCR default.
+    # Detection input resolution lever. With limit_type "max", side_len caps the
+    # LONGEST side (downscales big scans, never upscales) — intuitive and stable.
+    # With "min" (PaddleOCR default), it upscales the SHORTEST side, which can
+    # blow tiny images up enormously. None = PaddleOCR default.
     det_limit_side_len: int | None = None
+    det_limit_type: str | None = None  # "max" | "min" (None = PaddleOCR default)
     # Recognition batch size; lower to cut peak VRAM. None = PaddleOCR default.
     rec_batch_size: int | None = None
+    # PDF strategy:
+    #   "auto" — use the text layer, OCR only text-poor pages (fast, default)
+    #   "ocr"  — OCR every page, ignoring the text layer (best for bad scans)
+    #   "text" — text layer only, never OCR
+    pdf_mode: str = "auto"
+    pdf_dpi: int = 200
+    pdf_min_text_chars: int = 16
 
 
 class StorageSettings(BaseModel):
@@ -95,19 +122,32 @@ class MemorySettings(BaseModel):
 
 
 class VomeroSettings(BaseModel):
-    """L2 reasoning-engine knobs, owned by RAGu and passed through to vomero."""
+    """L2 reasoning-engine knobs, owned by RAGu and mapped onto vomero.Settings.
 
-    model: str = "claude-opus-4-8"
+    Provider-agnostic like the rest of RAGu: ``provider`` + ``base_url`` reach
+    OpenAI-compatible servers (incl. Anthropic's compat endpoint) or Gemini.
+    """
+
+    provider: str = "openai"  # vomero providers: "openai" | "gemini"
+    model: str = "gpt-4o-mini"
+    base_url: str | None = None
+    api_key: str | None = None  # falls back to vomero's env resolution if None
+
+    # RLM loop limits (map to vomero Settings of the same meaning).
+    max_steps: int = 24
     max_depth: int = 3
-    max_total_tokens: int = 200_000
-    max_total_calls: int = 40
+    max_parallel_calls: int = 8
+    max_total_tokens: int = 0  # 0 = unlimited (vomero convention)
+    max_total_calls: int = 0
     context_window: int = 128_000
     compact_ratio: float = 0.8
     max_output_chars: int = 10_000
-    plan: bool = False
-    sandbox: bool = False  # trusted corpus for v1
+    plan: bool = False  # -> vomero enable_planning
+    sandbox: bool = False  # True -> exec_backend="gvisor"; trusted corpus default
+
     # How L1's working set is materialised for vomero: "corpus" (temp folder) or
-    # "context" (in-memory). Corpus pairs naturally with grep/files navigation.
+    # "context" (in-memory). Corpus pairs naturally with grep/files navigation
+    # and is what enables document-level citations.
     handoff: str = "corpus"
 
 

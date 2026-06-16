@@ -13,7 +13,12 @@ from __future__ import annotations
 
 import json
 
-from ragu.core import Chunk, Document, DocumentId, ScoredChunk
+from ragu.core import Chunk, Document, DocumentId, DocumentRef, ScoredChunk
+
+
+def _id_list(doc_ids: list[DocumentId]) -> str:
+    """SQL ``IN`` list, single-quote-escaped, for a doc_id predicate."""
+    return ", ".join("'" + str(i).replace("'", "''") + "'" for i in doc_ids)
 
 
 class LanceVectorStore:
@@ -86,6 +91,12 @@ class LanceVectorStore:
         ]
         await table.add(records)
         await self._ensure_fts(table)
+
+    async def delete(self, doc_ids: list[DocumentId]) -> None:
+        if not doc_ids:
+            return
+        table = await self._ensure_table()
+        await table.delete(f"doc_id IN ({_id_list(doc_ids)})")
 
     async def _ensure_fts(self, table):  # type: ignore[no-untyped-def]
         """Create the full-text index once there is data to index."""
@@ -176,6 +187,9 @@ class LanceDocumentStore:
                     pa.field("source", pa.string()),
                     pa.field("content", pa.string()),
                     pa.field("metadata_json", pa.string()),
+                    # Structured ingestion byproducts (e.g. OCR geometry) as JSON,
+                    # so they survive indexing rather than being dropped.
+                    pa.field("artifacts_json", pa.string()),
                 ]
             )
             self._table = await self._conn.create_table(self._table_name, schema=schema)
@@ -191,23 +205,46 @@ class LanceDocumentStore:
                     "source": d.source,
                     "content": d.content,
                     "metadata_json": json.dumps(d.metadata),
+                    "artifacts_json": json.dumps(d.artifacts),
                 }
                 for d in documents
             ]
         )
 
+    async def delete(self, doc_ids: list[DocumentId]) -> None:
+        if not doc_ids:
+            return
+        table = await self._ensure_table()
+        await table.delete(f"id IN ({_id_list(doc_ids)})")
+
+    async def fingerprints(self) -> list[DocumentRef]:
+        table = await self._ensure_table()
+        # Pull only the small columns — never the document body.
+        rows = await table.query().select(["id", "source", "metadata_json"]).to_list()
+        refs: list[DocumentRef] = []
+        for r in rows:
+            meta = json.loads(r.get("metadata_json") or "{}")
+            refs.append(
+                DocumentRef(
+                    id=DocumentId(r["id"]),
+                    source=r["source"],
+                    content_hash=meta.get("content_hash"),
+                )
+            )
+        return refs
+
     async def get(self, doc_ids: list[DocumentId]) -> list[Document]:
         if not doc_ids:
             return []
         table = await self._ensure_table()
-        ids = ", ".join(f"'{i}'" for i in doc_ids)
-        rows = await table.query().where(f"id IN ({ids})").to_list()
+        rows = await table.query().where(f"id IN ({_id_list(doc_ids)})").to_list()
         by_id = {
             r["id"]: Document(
                 id=DocumentId(r["id"]),
                 source=r["source"],
                 content=r["content"],
                 metadata=json.loads(r.get("metadata_json") or "{}"),
+                artifacts=json.loads(r.get("artifacts_json") or "{}"),
             )
             for r in rows
         }

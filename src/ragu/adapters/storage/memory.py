@@ -11,7 +11,7 @@ import math
 import re
 from collections import Counter
 
-from ragu.core import Chunk, Document, DocumentId, ScoredChunk
+from ragu.core import Chunk, Document, DocumentId, DocumentRef, ScoredChunk
 
 _WORD = re.compile(r"\w+")
 
@@ -38,6 +38,18 @@ class InMemoryVectorStore:
             raise ValueError("chunks and embeddings must align 1:1")
         self._chunks.extend(chunks)
         self._embeddings.extend(embeddings)
+
+    async def delete(self, doc_ids: list[DocumentId]) -> None:
+        if not doc_ids:
+            return
+        drop = set(doc_ids)
+        kept = [
+            (c, e)
+            for c, e in zip(self._chunks, self._embeddings, strict=True)
+            if c.doc_id not in drop
+        ]
+        self._chunks = [c for c, _ in kept]
+        self._embeddings = [e for _, e in kept]
 
     async def search_dense(
         self,
@@ -113,3 +125,17 @@ class InMemoryDocumentStore:
 
     async def get(self, doc_ids: list[DocumentId]) -> list[Document]:
         return [self._docs[i] for i in doc_ids if i in self._docs]
+
+    async def delete(self, doc_ids: list[DocumentId]) -> None:
+        for i in doc_ids:
+            self._docs.pop(i, None)
+
+    async def fingerprints(self) -> list[DocumentRef]:
+        return [
+            DocumentRef(
+                id=doc.id,
+                source=doc.source,
+                content_hash=doc.metadata.get("content_hash"),
+            )
+            for doc in self._docs.values()
+        ]

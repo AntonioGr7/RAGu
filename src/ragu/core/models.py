@@ -9,7 +9,7 @@ behaviour that depends on infrastructure lives in adapters.
 
 from __future__ import annotations
 
-from typing import NewType
+from typing import Any, NewType
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,10 +32,42 @@ class Document(BaseModel):
     source: str  # path or URI the document was ingested from
     content: str
     metadata: dict[str, str] = Field(default_factory=dict)
+    # Structured, JSON-serializable byproducts of ingestion that don't fit the
+    # flat string ``metadata`` — e.g. OCR geometry (word boxes, polys, scores)
+    # under key "ocr". Carried alongside the document so it is never lost; how
+    # it is persisted/indexed is the storage layer's choice.
+    artifacts: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def n_bytes(self) -> int:
         return len(self.content.encode("utf-8"))
+
+
+class DocumentRef(BaseModel):
+    """A lightweight handle to a stored document — its id, source path, and
+    content fingerprint — without the (potentially large) content.
+
+    Used for incremental indexing: comparing the on-disk fingerprint against the
+    stored ``content_hash`` decides skip vs re-index, and ``source`` lets a prune
+    pass detect documents whose source file has been deleted."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: DocumentId
+    source: str
+    content_hash: str | None = None
+
+
+class IndexReport(BaseModel):
+    """Summary of one incremental index run, surfaced to the CLI."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chunks: int = 0  # chunks written this run
+    new: int = 0  # documents indexed for the first time
+    updated: int = 0  # changed documents re-indexed in place
+    skipped: int = 0  # unchanged documents left untouched (no OCR/embed)
+    pruned: int = 0  # documents removed because their source file is gone
 
 
 class Chunk(BaseModel):

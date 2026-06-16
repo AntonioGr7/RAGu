@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from ragu.core import Chunk, Document, DocumentId, ScoredChunk
+from ragu.core import Chunk, Document, DocumentId, DocumentRef, ScoredChunk
 
 
 @runtime_checkable
@@ -23,6 +23,12 @@ class VectorStore(Protocol):
     """
 
     async def add(self, chunks: list[Chunk], embeddings: list[list[float]]) -> None:
+        ...
+
+    async def delete(self, doc_ids: list[DocumentId]) -> None:
+        """Remove every chunk belonging to the given documents. Idempotent —
+        deleting ids with no chunks is a no-op. Called before re-adding a changed
+        document (so stale chunks don't linger) and when pruning deleted files."""
         ...
 
     async def search_dense(
@@ -54,4 +60,15 @@ class DocumentStore(Protocol):
     async def get(self, doc_ids: list[DocumentId]) -> list[Document]:
         """Return documents for the given ids, preserving order; missing ids are
         skipped (callers rank before fetching, so absence is non-fatal)."""
+        ...
+
+    async def delete(self, doc_ids: list[DocumentId]) -> None:
+        """Remove the given documents. Idempotent. Used by the prune pass."""
+        ...
+
+    async def fingerprints(self) -> list[DocumentRef]:
+        """Return a lightweight ref (id, source, content_hash) for every stored
+        document, without loading content. Drives incremental indexing: the
+        caller compares each on-disk file's fingerprint against these to decide
+        skip vs re-index, and uses ``source`` to detect deleted files."""
         ...

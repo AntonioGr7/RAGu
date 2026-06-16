@@ -11,13 +11,19 @@ dependencies = [
     "lancedb>=0.16",
     "openai>=2.0",  # generic OpenAI-compatible chat client (also fronts local/Anthropic-compat servers)
     "tiktoken>=0.8",
+    "python-dotenv>=1.0",  # load .env (provider API keys) into the environment
+    "tqdm>=4.66",  # extraction/ingestion progress bars
 ]
 
 [project.optional-dependencies]
-# Embeddings via Voyage. Optional so dev/tests run on the deterministic fake embedder.
+# Local embeddings (sentence-transformers). Default provider; runs CPU or GPU.
+local = ["sentence-transformers>=3.0"]
+# Hosted embeddings via Voyage.
 voyage = ["voyageai>=0.3"]
 # Gemini chat/embeddings provider.
 gemini = ["google-genai>=1.0"]
+# L2 reasoning engine (vomero — the RLM). Not on PyPI; installed from git.
+l2 = ["vomero @ git+https://github.com/AntonioGr7/vomero.git"]
 # PP-OCRv6 OCR ingestion for images/PDFs (PaddleOCR 3.x).
 # The paddle *runtime* is deliberately NOT here: choose CPU or GPU explicitly.
 ocr = ["paddleocr>=3.0", "pymupdf>=1.24", "pillow>=10"]
@@ -46,6 +52,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ragu"]
+
+# The `l2` extra pins vomero by git URL (it's not on PyPI); hatchling needs this
+# opt-in to allow such direct references in metadata.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 line-length = 100

@@ -29,8 +29,15 @@ class Indexer:
         self._batch = embed_batch_size
 
     async def index(self, documents: list[Document]) -> int:
-        """Index documents; returns the number of chunks written."""
+        """Index documents; returns the number of chunks written.
+
+        Idempotent per document: a document's previously-indexed chunks are
+        deleted before its new chunks are added, so re-indexing a changed (or
+        unchanged) document never leaves stale or duplicate chunks behind."""
+        if not documents:
+            return 0
         await self._document_store.put(documents)
+        await self._vector_store.delete([doc.id for doc in documents])
 
         all_chunks = []
         for doc in documents:

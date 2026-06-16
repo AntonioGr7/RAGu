@@ -77,11 +77,31 @@ On a small GPU (≈4 GB) use the tiny/small tier and cap detection resolution:
 `RAGU_OCR__REC_MODEL_NAME=PP-OCRv6_small_rec`,
 `RAGU_OCR__DET_LIMIT_SIDE_LEN=736`. PaddleOCR 3.7 defaults to PP-OCRv6.
 
+## Answering (L1 + L2)
+
+```bash
+ragu answer "what blocks P-BEACON?"   # needs the l2 extra (vomero) + an LLM key
+```
+
+```python
+answer = await Ragu().answer("what blocks P-BEACON?")
+print(answer.text)
+for c in answer.citations:           # document-level provenance
+    print(c.doc_id, c.source)
+```
+
+L2 reasoning is [vomero](https://github.com/AntonioGr7/vomero) behind the
+`ReasoningEngine` port. RAGu materializes the L1 working set as a temp corpus,
+vomero navigates it agentically (grep/read/recurse), and the answer comes back
+with citations derived from the files it touched. Install with the `l2` extra
+and configure via `RAGU_VOMERO__*` (provider/model/base_url/limits).
+
 ## Status
 
-L1 vertical slice is implemented and tested: ingest → contextual chunking →
-hybrid retrieval (RRF) → doc-level dedup → token-bounded working set, on both an
-in-memory backend and **LanceDB**.
+L1 vertical slice implemented and tested: ingest → contextual chunking → hybrid
+retrieval (RRF) → doc-level dedup → token-bounded working set (in-memory +
+**LanceDB**). **L2 (vomero) adapter wired**: working-set → corpus handoff,
+Answer + citations; validated end-to-end except the live LLM call.
 
 ## Develop
 
