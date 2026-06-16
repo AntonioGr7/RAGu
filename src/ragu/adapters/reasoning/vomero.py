@@ -15,6 +15,7 @@ vomero — swapping in another RLM means another adapter, nothing else.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 import tempfile
@@ -85,7 +86,7 @@ class VomeroReasoningEngine:
             provider=s.provider,
             model=s.model,
             base_url=s.base_url,
-            api_key=s.api_key,
+            api_key=s.api_key or _api_key_from_env(),
             max_steps=s.max_steps,
             max_depth=s.max_depth,
             max_parallel_calls=s.max_parallel_calls,
@@ -99,6 +100,19 @@ class VomeroReasoningEngine:
             enable_interaction=False,  # no human in the RAG loop
         )
         return build_engine(settings)
+
+
+def _api_key_from_env() -> str | None:
+    """Resolve the L2 API key from the environment when ``VomeroSettings.api_key``
+    is unset. We build vomero's ``Settings`` explicitly (not via its
+    ``from_env``), so vomero's own key fallback never runs — we mirror its
+    precedence here so a plain ``GEMINI_API_KEY`` / ``OPENAI_API_KEY`` in ``.env``
+    just works."""
+    for var in ("VOMERO_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        value = os.getenv(var)
+        if value:
+            return value
+    return None
 
 
 def corpus_filename(doc: Document) -> str:

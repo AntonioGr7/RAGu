@@ -10,6 +10,10 @@ data/**
 data
 .ragu
 
+# Local scratch / manual test scripts (never committed)
+/main.py
+/scratch_*.py
+
 # Distribution / packaging
 .Python
 build/

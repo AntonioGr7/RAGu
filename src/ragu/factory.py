@@ -103,14 +103,28 @@ def build_chunker(settings: RaguSettings, counter: TokenCounter) -> Chunker:
     return ContextualChunker(splitter, contextualizer)
 
 
-def build_stores(settings: RaguSettings, dim: int) -> tuple[VectorStore, DocumentStore]:
+def build_document_store(settings: RaguSettings) -> DocumentStore:
+    """Build the parent-document store. Needs no embedding dimension, so it can
+    be constructed without loading the (expensive) embedder — read-only commands
+    that only touch documents stay cheap."""
     if settings.storage.backend == "memory":
-        return InMemoryVectorStore(), InMemoryDocumentStore()
+        return InMemoryDocumentStore()
     if settings.storage.backend == "lance":
-        uri = settings.storage.lancedb_uri
-        vector = LanceVectorStore(uri, dim=dim, table=settings.storage.chunks_table)
-        documents = LanceDocumentStore(uri, table=settings.storage.documents_table)
-        return vector, documents
+        return LanceDocumentStore(
+            settings.storage.lancedb_uri, table=settings.storage.documents_table
+        )
+    raise ValueError(f"unknown storage backend: {settings.storage.backend!r}")
+
+
+def build_vector_store(settings: RaguSettings, dim: int) -> VectorStore:
+    """Build the chunk/vector store. Needs the embedding ``dim`` (so the embedder
+    must be available first)."""
+    if settings.storage.backend == "memory":
+        return InMemoryVectorStore()
+    if settings.storage.backend == "lance":
+        return LanceVectorStore(
+            settings.storage.lancedb_uri, dim=dim, table=settings.storage.chunks_table
+        )
     raise ValueError(f"unknown storage backend: {settings.storage.backend!r}")
 
 

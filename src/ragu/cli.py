@@ -55,6 +55,14 @@ def main(argv: list[str] | None = None) -> int:
     p_extract.add_argument("paths", nargs="+", help="input files or directories")
     p_extract.add_argument("-o", "--out", required=True, help="output directory")
 
+    sub.add_parser("list", help="list every indexed document")
+
+    p_show = sub.add_parser("show", help="show one indexed document's content + metadata")
+    p_show.add_argument("doc_id", help="the document id (as shown by `ragu list`)")
+    p_show.add_argument(
+        "--json", action="store_true", help="emit the full document (incl. artifacts) as JSON"
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "index":
@@ -84,6 +92,35 @@ def main(argv: list[str] | None = None) -> int:
             for c in answer.citations:
                 print(f"  - {c.doc_id}  [{c.source}]")
         print(f"\n(trace: {answer.trace})")
+        return 0
+
+    if args.command == "list":
+        refs = asyncio.run(Ragu().list_documents())
+        for ref in sorted(refs, key=lambda r: str(r.id)):
+            print(f"  - {ref.id}  [{ref.source}]")
+        print(f"{len(refs)} document(s).")
+        return 0
+
+    if args.command == "show":
+        doc = asyncio.run(Ragu().get_document(args.doc_id))
+        if doc is None:
+            print(f"No document with id '{args.doc_id}'.")
+            return 1
+        if args.json:
+            import json
+
+            print(json.dumps(doc.model_dump(), ensure_ascii=False, indent=2))
+        else:
+            print(f"id:     {doc.id}")
+            print(f"source: {doc.source}")
+            if doc.metadata:
+                print("metadata:")
+                for key, val in doc.metadata.items():
+                    print(f"  {key}: {val}")
+            if doc.artifacts:
+                print(f"artifacts: {', '.join(doc.artifacts)} (use --json for full detail)")
+            print("\n--- content ---")
+            print(doc.content)
         return 0
 
     if args.command == "extract":

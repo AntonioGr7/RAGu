@@ -18,18 +18,27 @@ from ragu.adapters.ingestion import (
 )
 from ragu.adapters.ingestion.ocr import OcrEngine
 from ragu.config import RaguSettings
-from ragu.core import Answer, Document, DocumentId, IndexReport, Query, WorkingSet
+from ragu.core import (
+    Answer,
+    Document,
+    DocumentId,
+    DocumentRef,
+    IndexReport,
+    Query,
+    WorkingSet,
+)
 from ragu.factory import (
     build_chunker,
+    build_document_store,
     build_embedder,
     build_ocr_engine,
     build_reasoning_engine,
     build_retriever,
-    build_stores,
+    build_vector_store,
     build_token_counter,
 )
 from ragu.pipeline import Indexer, build_working_set
-from ragu.ports import ReasoningEngine
+from ragu.ports import Embedder, ReasoningEngine, Retriever, VectorStore
 
 
 def _is_under(path: Path, root: Path) -> bool:
@@ -41,21 +50,46 @@ class Ragu:
     def __init__(self, settings: RaguSettings | None = None) -> None:
         self._settings = settings or RaguSettings()
         self._counter = build_token_counter(self._settings)
-        self._embedder = build_embedder(self._settings)
-        self._vector_store, self._document_store = build_stores(
-            self._settings, self._embedder.dim
-        )
-        self._chunker = build_chunker(self._settings, self._counter)
-        self._indexer = Indexer(
-            self._chunker,
-            self._embedder,
-            self._vector_store,
-            self._document_store,
-            embed_batch_size=self._settings.embedding.batch_size,
-        )
-        self._retriever = build_retriever(self._settings, self._embedder, self._vector_store)
+        # The document store needs no embedding dimension, so it is built eagerly
+        # and cheaply — read-only commands (list/show/get) never pay to load the
+        # embedder. Everything that depends on the embedder is built lazily below.
+        self._document_store = build_document_store(self._settings)
+        self._embedder: Embedder | None = None
+        self._vector_store: VectorStore | None = None
+        self._indexer: Indexer | None = None
+        self._retriever: Retriever | None = None
         self._ocr: OcrEngine | None = None
         self._reasoning: ReasoningEngine | None = None  # built lazily (needs vomero)
+
+    def _ensure_embedder(self) -> Embedder:
+        if self._embedder is None:
+            self._embedder = build_embedder(self._settings)
+        return self._embedder
+
+    def _ensure_vector_store(self) -> VectorStore:
+        if self._vector_store is None:
+            self._vector_store = build_vector_store(
+                self._settings, self._ensure_embedder().dim
+            )
+        return self._vector_store
+
+    def _ensure_indexer(self) -> Indexer:
+        if self._indexer is None:
+            self._indexer = Indexer(
+                build_chunker(self._settings, self._counter),
+                self._ensure_embedder(),
+                self._ensure_vector_store(),
+                self._document_store,
+                embed_batch_size=self._settings.embedding.batch_size,
+            )
+        return self._indexer
+
+    def _ensure_retriever(self) -> Retriever:
+        if self._retriever is None:
+            self._retriever = build_retriever(
+                self._settings, self._ensure_embedder(), self._ensure_vector_store()
+            )
+        return self._retriever
 
     def _ensure_ocr(self) -> OcrEngine | None:
         if self._ocr is None:
@@ -126,12 +160,12 @@ class Ragu:
             and not Path(ref.source).exists()
         ]
         if dead:
-            await self._vector_store.delete(dead)
+            await self._ensure_vector_store().delete(dead)
             await self._document_store.delete(dead)
         return len(dead)
 
     async def index_documents(self, documents: list[Document]) -> int:
-        return await self._indexer.index(documents)
+        return await self._ensure_indexer().index(documents)
 
     def extract_paths(self, paths: list[str | Path], out_dir: str | Path) -> int:
         """Load files/folders (text + OCR'd images/PDFs) and dump the extracted
@@ -149,6 +183,23 @@ class Ragu:
             pdf_min_text_chars=cfg.pdf_min_text_chars,
         )
 
+    async def list_documents(self) -> list[DocumentRef]:
+        """List every indexed document as a lightweight ref (id, source,
+        content_hash) — no content loaded, so it stays cheap on large corpora.
+        Use :meth:`get_document` to pull full bodies for the ids you want."""
+        return await self._document_store.fingerprints()
+
+    async def get_document(self, doc_id: str | DocumentId) -> Document | None:
+        """Fetch one indexed document in full (content + metadata + artifacts),
+        or ``None`` if no document has that id."""
+        docs = await self._document_store.get([DocumentId(str(doc_id))])
+        return docs[0] if docs else None
+
+    async def get_documents(self, doc_ids: list[str | DocumentId]) -> list[Document]:
+        """Fetch several indexed documents in full, preserving the requested
+        order; ids with no stored document are skipped."""
+        return await self._document_store.get([DocumentId(str(i)) for i in doc_ids])
+
     async def retrieve(self, text: str, **query_kwargs: str) -> WorkingSet:
         """Run L1 and assemble the token-bounded working set for the query."""
         return await self._working_set(Query(text=text, **query_kwargs))
@@ -160,7 +211,9 @@ class Ragu:
         return await self._ensure_reasoning().reason(query, working_set)
 
     async def _working_set(self, query: Query) -> WorkingSet:
-        result = await self._retriever.retrieve(query, k=self._settings.retrieval.candidate_k)
+        result = await self._ensure_retriever().retrieve(
+            query, k=self._settings.retrieval.candidate_k
+        )
         ranked = result.to_documents()
         return await build_working_set(
             ranked,
