@@ -60,6 +60,9 @@ class VomeroReasoningEngine:
                 text=answer_text,
                 citations=tuple(citations),
                 used_reasoning=True,
+                # The text the model actually read (read/grep output) — used by
+                # the grounding pass to anchor citations in the real evidence.
+                evidence=evidence_from_trajectory(steps),
                 trace={
                     "engine": "vomero",
                     "tokens": str(tokens),
@@ -161,6 +164,16 @@ def citations_from_trajectory(
             seen.add(doc_id)
             cited.append(Citation(doc_id=doc_id, source=sources.get(doc_id, rel)))
     return cited
+
+
+def evidence_from_trajectory(steps: list[Any]) -> tuple[str, ...]:
+    """The verbatim text the model read during reasoning — each step's ``output``
+    (the result of its read/grep code). This is exactly the evidence the answer
+    rests on, so grounding it yields more specific citations than re-reading the
+    whole document. Empty/blank outputs are skipped."""
+    return tuple(
+        out for s in steps if (out := (getattr(s, "output", None) or "").strip())
+    )
 
 
 def _unpack(result: Any) -> tuple[str, list[Any], int, int]:

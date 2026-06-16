@@ -63,3 +63,23 @@ async def test_working_set_respects_token_budget() -> None:
     big = await build_working_set(ranked, dstore, COUNTER, max_tokens=100_000)
     assert big.truncated is False
     assert big.token_count == sum(COUNTER.count(d.content) for d in big.documents)
+
+
+@pytest.mark.asyncio
+async def test_working_set_doc_count_bound_ignores_tokens() -> None:
+    # Corpus handoff: max_tokens=None -> bound purely by document count, so a
+    # large first document never starves out the rest.
+    retriever, dstore = await _build_index()
+    result = await retriever.retrieve(Query(text="risotto broth rice"), k=20)
+    ranked = result.to_documents()
+
+    ws = await build_working_set(ranked, dstore, COUNTER, max_tokens=None)
+    assert len(ws.documents) == len(ranked)
+    assert ws.truncated is False
+
+    capped = await build_working_set(
+        ranked, dstore, COUNTER, max_tokens=None, max_documents=1
+    )
+    assert len(capped.documents) == 1
+    # Dropped by the count cap (when more were ranked), so coverage is flagged.
+    assert capped.truncated is (len(ranked) > 1)

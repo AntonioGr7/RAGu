@@ -48,6 +48,19 @@ def main(argv: list[str] | None = None) -> int:
 
     p_answer = sub.add_parser("answer", help="L1+L2: reason over the working set (needs vomero)")
     p_answer.add_argument("query", help="the query text")
+    p_answer.add_argument(
+        "--cite",
+        action="store_true",
+        help="ground the answer: inline citations with quotes + page/word boxes (extra LLM call)",
+    )
+    p_answer.add_argument(
+        "--cite-source",
+        choices=["trajectory", "document", "raw"],
+        default=None,
+        help="grounding evidence: 'trajectory' (LLM over what L2 read, default), "
+        "'document' (LLM over the whole document), or 'raw' (no extra LLM call). "
+        "Implies --cite.",
+    )
 
     p_extract = sub.add_parser(
         "extract", help="extract text (incl. OCR) from a folder into another folder"
@@ -85,12 +98,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "answer":
-        answer = asyncio.run(Ragu().answer(args.query))
+        ground = args.cite or args.cite_source is not None or None
+        answer = asyncio.run(
+            Ragu().answer(args.query, ground=ground, grounding_source=args.cite_source)
+        )
         print(answer.text)
         if answer.citations:
             print("\nSources:")
             for c in answer.citations:
                 print(f"  - {c.doc_id}  [{c.source}]")
+                if c.quote:
+                    print(f"      “{c.quote.strip()[:160]}”")
+                for h in c.highlights:
+                    print(f"      page {h.page}: {len(h.boxes)} box(es) {h.boxes}")
         print(f"\n(trace: {answer.trace})")
         return 0
 

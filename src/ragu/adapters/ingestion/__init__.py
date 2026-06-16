@@ -34,6 +34,12 @@ from ragu.adapters.ingestion.ocr import (
     PaddleOcrEngine,
     load_ocr_file,
 )
+from ragu.adapters.ingestion.geometry import (
+    WordLayout,
+    WordSpan,
+    build_word_layout,
+    highlights_for_span,
+)
 from ragu.adapters.ingestion.pdf import load_pdf_file
 from ragu.core import Document
 
@@ -46,8 +52,12 @@ __all__ = [
     "OcrPage",
     "OcrWord",
     "PaddleOcrEngine",
+    "WordLayout",
+    "WordSpan",
+    "build_word_layout",
     "dump_documents",
     "file_fingerprint",
+    "highlights_for_span",
     "iter_files",
     "load_files",
     "load_one",

@@ -28,6 +28,7 @@ from ragu.core import (
     WorkingSet,
 )
 from ragu.factory import (
+    build_chat_model,
     build_chunker,
     build_document_store,
     build_embedder,
@@ -38,7 +39,8 @@ from ragu.factory import (
     build_token_counter,
 )
 from ragu.pipeline import Indexer, build_working_set
-from ragu.ports import Embedder, ReasoningEngine, Retriever, VectorStore
+from ragu.pipeline.grounding import ground_answer
+from ragu.ports import ChatModel, Embedder, ReasoningEngine, Retriever, VectorStore
 
 
 def _is_under(path: Path, root: Path) -> bool:
@@ -58,8 +60,14 @@ class Ragu:
         self._vector_store: VectorStore | None = None
         self._indexer: Indexer | None = None
         self._retriever: Retriever | None = None
+        self._chat_model: ChatModel | None = None
         self._ocr: OcrEngine | None = None
         self._reasoning: ReasoningEngine | None = None  # built lazily (needs vomero)
+
+    def _ensure_chat_model(self) -> ChatModel:
+        if self._chat_model is None:
+            self._chat_model = build_chat_model(self._settings)
+        return self._chat_model
 
     def _ensure_embedder(self) -> Embedder:
         if self._embedder is None:
@@ -204,22 +212,52 @@ class Ragu:
         """Run L1 and assemble the token-bounded working set for the query."""
         return await self._working_set(Query(text=text, **query_kwargs))
 
-    async def answer(self, text: str, **query_kwargs: str) -> Answer:
-        """Full pipeline: L1 selects a working set, L2 (vomero) reasons over it."""
+    async def answer(
+        self,
+        text: str,
+        *,
+        ground: bool | None = None,
+        grounding_source: str | None = None,
+        **query_kwargs: str,
+    ) -> Answer:
+        """Full pipeline: L1 selects a working set, L2 (vomero) reasons over it.
+
+        When ``ground`` is true (defaults to ``RAGU_VOMERO__GROUND_CITATIONS``),
+        an extra LLM pass replaces the document-level citations with span-level
+        ones anchored to page + word boxes. ``grounding_source`` (defaults to
+        ``RAGU_VOMERO__GROUNDING_SOURCE``) chooses whether quotes are drawn from
+        what L2 actually read (``"trajectory"``) or the full document
+        (``"document"``). Leave grounding off for the fastest path."""
         query = Query(text=text, **query_kwargs)
         working_set = await self._working_set(query)
-        return await self._ensure_reasoning().reason(query, working_set)
+        answer = await self._ensure_reasoning().reason(query, working_set)
+        if ground is None:
+            ground = self._settings.vomero.ground_citations
+        if ground:
+            source = grounding_source or self._settings.vomero.grounding_source
+            # "raw" needs no LLM (and no API key) — don't build the chat model.
+            chat = None if source == "raw" else self._ensure_chat_model()
+            answer = await ground_answer(answer, working_set, chat, source=source)
+        # Never hand the (potentially large) raw evidence dumps back to callers.
+        return answer.model_copy(update={"evidence": ()}) if answer.evidence else answer
 
     async def _working_set(self, query: Query) -> WorkingSet:
         result = await self._ensure_retriever().retrieve(
             query, k=self._settings.retrieval.candidate_k
         )
         ranked = result.to_documents()
+        # In corpus handoff L2 navigates the docs as files, so the token budget
+        # (a context-window concern) doesn't apply — bound by document count only.
+        token_budget = (
+            None
+            if self._settings.vomero.handoff == "corpus"
+            else self._settings.working_set.max_tokens
+        )
         return await build_working_set(
             ranked,
             self._document_store,
             self._counter,
-            max_tokens=self._settings.working_set.max_tokens,
+            max_tokens=token_budget,
             max_documents=self._settings.retrieval.document_k,
         )
 

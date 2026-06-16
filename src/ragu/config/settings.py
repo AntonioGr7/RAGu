@@ -150,6 +150,15 @@ class VomeroSettings(BaseModel):
     # and is what enables document-level citations.
     handoff: str = "corpus"
 
+    # Optional post-answer grounding pass: a cheap LLM call (via the chat-model
+    # port) extracts verbatim supporting quotes and resolves them to page + word
+    # boxes (inline citations). Off by default — it costs one extra LLM call, so
+    # leave it off for the fastest answers.
+    ground_citations: bool = False
+    # Where grounding extracts quotes from: "trajectory" (what L2 actually read —
+    # more specific) or "document" (the whole cited document).
+    grounding_source: str = "trajectory"
+
 
 class WorkingSetSettings(BaseModel):
     # The real bound on L2 cost is text volume, not document count.

@@ -180,11 +180,33 @@ class Query(BaseModel):
     filters: dict[str, str] = Field(default_factory=dict)
 
 
+# Axis-aligned box (x1, y1, x2, y2) in a page's own pixel space.
+Box = tuple[int, int, int, int]
+
+
+class Highlight(BaseModel):
+    """Where a citation's quote sits on a source page.
+
+    ``boxes`` are line-level rectangles (one per line the quote covers) in the
+    page's own pixel space; ``width``/``height`` are that page's dimensions so a
+    consumer can normalise the boxes onto the page rendered at any resolution.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    page: int  # zero-based page index within the document
+    boxes: tuple[Box, ...]
+    width: int | None = None
+    height: int | None = None
+
+
 class Citation(BaseModel):
     """A pointer from an answer back to the source it rests on.
 
     Provenance must survive the whole pipeline: L2 navigates documents and must
     be able to say *which* document (and ideally which span) grounds each claim.
+    ``highlights`` add page-level spatial anchors (word boxes) when the source
+    carries OCR/text-layer geometry — empty otherwise.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -194,6 +216,7 @@ class Citation(BaseModel):
     quote: str | None = None
     start_char: int | None = None
     end_char: int | None = None
+    highlights: tuple[Highlight, ...] = ()
 
 
 class Answer(BaseModel):
@@ -205,3 +228,8 @@ class Answer(BaseModel):
     citations: tuple[Citation, ...] = ()
     used_reasoning: bool = False  # True if L2 (RLM) was invoked
     trace: dict[str, str] = Field(default_factory=dict)
+    # Transient: the verbatim source text the reasoning engine actually read
+    # (e.g. vomero's read/grep output). Used to ground citations in exactly the
+    # evidence the answer rests on; cleared by the facade before the answer is
+    # returned, so it is normally empty.
+    evidence: tuple[str, ...] = ()
