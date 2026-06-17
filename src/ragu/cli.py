@@ -61,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
         "'document' (LLM over the whole document), or 'raw' (no extra LLM call). "
         "Implies --cite.",
     )
+    p_answer.add_argument(
+        "--cite-images",
+        metavar="DIR",
+        default=None,
+        help="debug: render cited pages with their boxes drawn into DIR. Implies --cite.",
+    )
 
     p_extract = sub.add_parser(
         "extract", help="extract text (incl. OCR) from a folder into another folder"
@@ -98,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "answer":
-        ground = args.cite or args.cite_source is not None or None
+        ground = args.cite or args.cite_source is not None or args.cite_images is not None or None
         answer = asyncio.run(
             Ragu().answer(args.query, ground=ground, grounding_source=args.cite_source)
         )
@@ -111,6 +117,11 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"      “{c.quote.strip()[:160]}”")
                 for h in c.highlights:
                     print(f"      page {h.page}: {len(h.boxes)} box(es) {h.boxes}")
+        if args.cite_images:
+            from ragu.render import save_citation_overlays
+
+            saved = save_citation_overlays(answer.citations, args.cite_images)
+            print(f"\nSaved {len(saved)} citation overlay image(s) to {args.cite_images}")
         print(f"\n(trace: {answer.trace})")
         return 0
 

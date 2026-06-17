@@ -196,12 +196,21 @@ def _place_quote(quote: str, docs: list[Document], layouts: dict) -> Citation:
     document isn't fuzzily mis-attributed to a near-duplicate sibling (these
     template contracts differ by a digit or two). If it can't be placed at all,
     the quote is still cited (attributed to the first doc) without highlights."""
+    q_nums = _salient(quote)[0]
     for fuzzy in (False, True):  # exact/normalised pass first, then fuzzy
         for doc in docs:
             layout = layouts.get(doc.id)
             source_text = layout.text if layout is not None else doc.content
             span = locate(source_text, quote, fuzzy=fuzzy)
             if span is None:
+                continue
+            # A fuzzy hit on these near-duplicate template contracts can land on a
+            # sibling's date/amount — only the digits differ, and a short quote
+            # matches ~70% of its chars on the wrong one. Require the located text
+            # to share a salient number with the quote, so "30 settembre 2009"
+            # can't resolve onto "14 settembre 2005". (Exact/normalised hits are
+            # verbatim, so the guard only applies to the fuzzy pass.)
+            if fuzzy and q_nums and not (q_nums & _salient(source_text[span[0] : span[1]])[0]):
                 continue
             highlights = (
                 tuple(highlights_for_span(layout, *span)) if layout is not None else ()
@@ -355,14 +364,23 @@ def locate(
     blocks = [b for b in matcher.get_matching_blocks() if b.size > 0]
     if not blocks:
         return None
-    matched = sum(b.size for b in blocks)
+    # Anchor on the longest matching block and keep only the blocks within a
+    # quote-length window of it. A single OCR-substituted character splits a
+    # short quote in two (e.g. "2009" -> "2Ó09"), and difflib then matches the
+    # stray tail ("009") to another occurrence far away — inflating the span
+    # across half the document so the guard below rejects an otherwise-clean
+    # local match. Windowing around the anchor discards those distant fragments.
+    anchor = max(blocks, key=lambda b: b.size)
+    window = len(norm_q) * 2 + 16
+    local = [b for b in blocks if anchor.a - window <= b.a <= anchor.a + window]
+    matched = sum(b.size for b in local)
     if matched / len(norm_q) < min_ratio:
         return None
-    start_norm = blocks[0].a
-    end_norm = min(blocks[-1].a + blocks[-1].size, len(index_map))
+    start_norm = local[0].a
+    end_norm = min(local[-1].a + local[-1].size, len(index_map))
     # Reject scattered matches: a genuine hit spans about the quote's length, not
     # half the document. Without this, a quote that isn't really present matches
     # its common words all over and resolves to a giant, wrong span.
-    if end_norm - start_norm > len(norm_q) * 2 + 16:
+    if end_norm - start_norm > window:
         return None
     return (index_map[start_norm], index_map[end_norm - 1] + 1)

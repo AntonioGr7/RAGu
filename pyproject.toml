@@ -24,6 +24,8 @@ voyage = ["voyageai>=0.3"]
 gemini = ["google-genai>=1.0"]
 # L2 reasoning engine (vomero — the RLM). Not on PyPI; installed from git.
 l2 = ["vomero @ git+https://github.com/AntonioGr7/vomero.git"]
+# Web demo: FastAPI server exposing query + page-image endpoints for the frontend.
+web = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 # PP-OCRv6 OCR ingestion for images/PDFs (PaddleOCR 3.x).
 # The paddle *runtime* is deliberately NOT here: choose CPU or GPU explicitly.
 ocr = ["paddleocr>=3.0", "pymupdf>=1.24", "pillow>=10"]
