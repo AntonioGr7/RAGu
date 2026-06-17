@@ -24,7 +24,10 @@ export interface WorkingDoc {
   source: string;
 }
 
-export interface QueryResult {
+// A completed answer turn.
+export interface AnswerTurn {
+  type: "answer";
+  session_id: string;
   answer: string;
   used_reasoning: boolean;
   trace: Record<string, string>;
@@ -33,22 +36,63 @@ export interface QueryResult {
   elapsed_ms: number;
 }
 
+// L2 paused mid-reasoning to ask the user something.
+export interface QuestionTurn {
+  type: "question";
+  session_id: string;
+  question: string;
+}
+
+export type TurnResult = AnswerTurn | QuestionTurn;
+
 export type GroundingSource = "trajectory" | "document" | "raw";
 
-export async function runQuery(
-  query: string,
-  groundingSource: GroundingSource,
-): Promise<QueryResult> {
-  const res = await fetch("/api/query", {
+async function postTurn(path: string, body: unknown): Promise<TurnResult> {
+  const res = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, grounding_source: groundingSource }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const detail = await res.text();
-    throw new Error(`Query failed (${res.status}): ${detail}`);
+    throw new Error(`Request failed (${res.status}): ${detail}`);
   }
   return res.json();
+}
+
+// Start a new turn for a session (a fresh L1+L2 run over the corpus). When
+// fullCorpus is set, L1 retrieval is skipped and L2 reasons over every document.
+export function sendMessage(
+  sessionId: string,
+  message: string,
+  groundingSource: GroundingSource,
+  fullCorpus = false,
+): Promise<TurnResult> {
+  return postTurn("/api/chat", {
+    session_id: sessionId,
+    message,
+    grounding_source: groundingSource,
+    full_corpus: fullCorpus,
+  });
+}
+
+// Answer L2's pending clarifying question; resumes the same turn.
+export function respond(sessionId: string, answer: string): Promise<TurnResult> {
+  return postTurn("/api/respond", { session_id: sessionId, answer });
+}
+
+// End a session — cancels any in-flight turn so the server lock is released.
+export async function resetSession(sessionId: string): Promise<void> {
+  await fetch("/api/reset", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId }),
+  }).catch(() => {});
+}
+
+// SSE endpoint streaming L2's live reasoning log for a session's in-flight turn.
+export function traceStreamUrl(sessionId: string): string {
+  return `/api/trace?session_id=${encodeURIComponent(sessionId)}`;
 }
 
 export async function listDocuments(): Promise<WorkingDoc[]> {

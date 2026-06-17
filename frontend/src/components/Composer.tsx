@@ -2,10 +2,14 @@ import { useState } from "react";
 import { GroundingSource } from "../api";
 
 interface Props {
-  onSubmit: (query: string) => void;
-  loading: boolean;
+  onSubmit: (text: string) => void;
+  pending: boolean;
+  awaitingQuestion: boolean;
   grounding: GroundingSource;
   onGroundingChange: (g: GroundingSource) => void;
+  fullCorpus: boolean;
+  onFullCorpusChange: (v: boolean) => void;
+  showExamples: boolean;
 }
 
 const EXAMPLES = [
@@ -20,19 +24,52 @@ const SOURCES: { id: GroundingSource; label: string; hint: string }[] = [
   { id: "raw", label: "raw", hint: "no extra LLM — the lines L2 read" },
 ];
 
-export function QueryBar({ onSubmit, loading, grounding, onGroundingChange }: Props) {
+export function Composer({
+  onSubmit,
+  pending,
+  awaitingQuestion,
+  grounding,
+  onGroundingChange,
+  fullCorpus,
+  onFullCorpusChange,
+  showExamples,
+}: Props) {
   const [text, setText] = useState("");
 
   const submit = () => {
-    if (text.trim() && !loading) onSubmit(text.trim());
+    const t = text.trim();
+    if (t && !pending) {
+      onSubmit(t);
+      setText("");
+    }
   };
 
   return (
-    <div className="querybar">
-      <div className="input-row">
+    <div className={`composer ${awaitingQuestion ? "composer-answering" : ""}`}>
+      {showExamples && (
+        <div className="examples">
+          <span className="ctrl-label">try</span>
+          {EXAMPLES.map((ex) => (
+            <button
+              key={ex}
+              className="example"
+              onClick={() => setText(ex)}
+              disabled={pending}
+            >
+              {ex}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="composer-box">
         <textarea
           className="query-input"
-          placeholder="Ask anything about the indexed documents…"
+          placeholder={
+            awaitingQuestion
+              ? "Answer L2's question…"
+              : "Ask anything about the indexed documents…"
+          }
           value={text}
           rows={2}
           onChange={(e) => setText(e.target.value)}
@@ -43,8 +80,8 @@ export function QueryBar({ onSubmit, loading, grounding, onGroundingChange }: Pr
             }
           }}
         />
-        <button className="ask-btn" onClick={submit} disabled={loading || !text.trim()}>
-          {loading ? <span className="dots" /> : "Ask"}
+        <button className="ask-btn" onClick={submit} disabled={pending || !text.trim()}>
+          {pending ? <span className="dots" /> : awaitingQuestion ? "Reply" : "Ask"}
         </button>
       </div>
 
@@ -57,20 +94,20 @@ export function QueryBar({ onSubmit, loading, grounding, onGroundingChange }: Pr
               title={s.hint}
               className={`pill ${grounding === s.id ? "pill-on" : ""}`}
               onClick={() => onGroundingChange(s.id)}
+              disabled={awaitingQuestion}
             >
               {s.label}
             </button>
           ))}
         </div>
-      </div>
-
-      <div className="examples">
-        <span className="ctrl-label">try</span>
-        {EXAMPLES.map((ex) => (
-          <button key={ex} className="example" onClick={() => setText(ex)} disabled={loading}>
-            {ex}
-          </button>
-        ))}
+        <button
+          className={`pill ${fullCorpus ? "pill-on" : ""}`}
+          title="Skip L1 retrieval — let L2 reason over every indexed document"
+          onClick={() => onFullCorpusChange(!fullCorpus)}
+          disabled={awaitingQuestion}
+        >
+          full corpus
+        </button>
       </div>
     </div>
   );

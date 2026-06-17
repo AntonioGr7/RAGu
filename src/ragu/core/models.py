@@ -219,6 +219,21 @@ class Citation(BaseModel):
     highlights: tuple[Highlight, ...] = ()
 
 
+class EvidenceSpan(BaseModel):
+    """A grep hit L2 retrieved from one document, tagged with its home document.
+
+    Structured retrieval provenance (vomero's access log): each matched line
+    carries the document it came from, so grounding can place the quote in that
+    exact document instead of fuzzy-searching it across near-duplicate siblings
+    (which mis-attributes spans that differ only by a digit).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    doc_id: DocumentId
+    text: str
+
+
 class Answer(BaseModel):
     """The system's response to a query, with citations and a light trace."""
 
@@ -233,3 +248,7 @@ class Answer(BaseModel):
     # evidence the answer rests on; cleared by the facade before the answer is
     # returned, so it is normally empty.
     evidence: tuple[str, ...] = ()
+    # Transient: structured grep provenance from L2 — the lines it matched, each
+    # tagged with the document it came from. The "raw" grounding source consumes
+    # these directly (no stdout scraping). Cleared by the facade like ``evidence``.
+    evidence_spans: tuple[EvidenceSpan, ...] = ()

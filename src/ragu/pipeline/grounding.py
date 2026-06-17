@@ -24,7 +24,7 @@ import logging
 import re
 
 from ragu.adapters.ingestion import build_word_layout, highlights_for_span
-from ragu.core import Answer, Citation, Document, WorkingSet
+from ragu.core import Answer, Citation, Document, DocumentId, EvidenceSpan, WorkingSet
 from ragu.ports import ChatModel
 from ragu.ports.llm import ChatMessage
 
@@ -87,11 +87,17 @@ async def ground_answer(
     # Each candidate is a quote plus the documents it should be located in.
     candidates: list[tuple[str, list[Document]]] = []
     if source == RAW:
-        if not answer.evidence:
-            logger.info("Grounding: raw source has no L2 evidence to ground")
+        if not answer.evidence_spans:
+            logger.info("Grounding: raw source has no L2 grep provenance to ground")
             return answer
-        for line in _relevant_evidence_lines(answer.evidence, answer.text):
-            candidates.append((line, targets))
+        by_id = {doc.id: doc for doc in targets}
+        for doc_id, text in _relevant_evidence_spans(answer.evidence_spans, answer.text):
+            home = by_id.get(doc_id)
+            if home is None:  # the grep'd doc isn't among the grounding targets
+                continue
+            # Each fragment already carries its real home doc, so it's located
+            # only there — never fuzzy-matched onto a near-duplicate sibling.
+            candidates.append((text, [home]))
     elif source == TRAJECTORY and answer.evidence:
         evidence = _truncate("\n\n".join(answer.evidence), max_source_chars, "trajectory")
         for quote in await _extract_quotes(chat_model, answer.text, "evidence", evidence):
@@ -135,57 +141,29 @@ async def ground_answer(
     return answer.model_copy(update={"citations": tuple(grounded)})
 
 
-# vomero's read output is REPL stdout, not clean text: grep hits carry a
-# "<file>:<lineno>:" prefix, and list prints wrap fragments in quotes. We strip
-# those so the underlying source text can be located in the canonical text.
-_GREP_PREFIX = re.compile(r"[^\s,\[\]:]+:\d+:\s*")
-_QUOTED = re.compile(r"'([^']*)'|\"([^\"]*)\"")
-_LEADING_NOISE = re.compile(r"^[-•*–—\s]+")
-
-
-def _evidence_fragments(block: str) -> list[str]:
-    """Recover candidate source spans from one block of L2 read output.
-
-    Handles the two shapes vomero emits: Python list prints (``['a', 'b']`` →
-    the quoted fragments) and grep dumps (``file.txt:43: text`` → the text after
-    the prefix). Anything else is treated as plain lines."""
-    quoted = _QUOTED.findall(block)
-    if quoted:
-        raw = [a or b for a, b in quoted]
-    else:
-        raw = [block]
-    fragments: list[str] = []
-    for piece in raw:
-        # One fragment per line: a multi-line read dump would otherwise resolve to
-        # a giant span (dozens of boxes) instead of a tidy line-level highlight.
-        for line in _GREP_PREFIX.sub("\n", piece).splitlines():
-            line = _LEADING_NOISE.sub("", line.strip().strip("[]")).strip(" ,=\t")
-            if line:
-                fragments.append(line)
-    return fragments
-
-
-def _relevant_evidence_lines(
-    evidence: tuple[str, ...], answer_text: str, *, min_len: int = 14, cap: int = 40
-) -> list[str]:
-    """Source fragments from L2's read output that overlap the answer's facts
-    (share a number or name), de-duplicated and capped. The selection that the
-    LLM does in the other modes, here done by the relevance heuristic — no model
-    call. vomero's REPL formatting (grep prefixes, list quotes) is stripped first
-    so the fragments can actually be located in the document."""
-    seen: set[str] = set()
-    lines: list[str] = []
-    for block in evidence:
-        for fragment in _evidence_fragments(block):
-            if len(fragment) < min_len or fragment in seen:
-                continue
-            if not _is_relevant(answer_text, fragment):
-                continue
-            seen.add(fragment)
-            lines.append(fragment)
-            if len(lines) >= cap:
-                return lines
-    return lines
+def _relevant_evidence_spans(
+    spans: tuple[EvidenceSpan, ...], answer_text: str, *, min_len: int = 14, cap: int = 40
+) -> list[tuple[DocumentId, str]]:
+    """The grep hits from L2's access log that overlap the answer's facts (share
+    a number or name), de-duplicated per document and capped. This is the
+    selection the LLM does in the other modes, here done by the relevance
+    heuristic — no model call. The fragments are already clean, doc-tagged source
+    lines (vomero recorded them straight from the file), so there's no REPL
+    stdout to strip and no need to guess which document each came from."""
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[DocumentId, str]] = []
+    for span in spans:
+        text = span.text.strip()
+        key = (str(span.doc_id), text)
+        if len(text) < min_len or key in seen:
+            continue
+        if not _is_relevant(answer_text, text):
+            continue
+        seen.add(key)
+        out.append((span.doc_id, text))
+        if len(out) >= cap:
+            return out
+    return out
 
 
 def _place_quote(quote: str, docs: list[Document], layouts: dict) -> Citation:

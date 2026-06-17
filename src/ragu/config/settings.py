@@ -142,8 +142,20 @@ class VomeroSettings(BaseModel):
     context_window: int = 128_000
     compact_ratio: float = 0.8
     max_output_chars: int = 10_000
-    plan: bool = False  # -> vomero enable_planning
+    # Let L2 maintain a live TODO plan (vomero's planning surface: todo.plan/
+    # start/complete/add) — it externalises its step-by-step plan and works
+    # through it. On by default; set RAGU_VOMERO__PLAN=false to disable.
+    plan: bool = True  # -> vomero enable_planning
     sandbox: bool = False  # True -> exec_backend="gvisor"; trusted corpus default
+    # Let L2 ask the user a clarifying question mid-run (-> vomero
+    # enable_interaction). On a terminal the question is prompted; headless
+    # (server/eval, no TTY) it degrades gracefully — vomero proceeds with its
+    # best judgment, never hanging on a human that isn't there.
+    interactive: bool = True
+    # Stream vomero's per-step trace (code it runs, read output, messages, token
+    # usage) to stderr live as it reasons. Off by default; flip on to watch what
+    # L2 is doing (RAGU_VOMERO__VERBOSE=true).
+    verbose: bool = False
 
     # How L1's working set is materialised for vomero: "corpus" (temp folder) or
     # "context" (in-memory). Corpus pairs naturally with grep/files navigation

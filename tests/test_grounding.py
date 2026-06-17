@@ -3,14 +3,12 @@
 import pytest
 
 from ragu.adapters.ingestion.ocr import OcrArtifact, OcrLine, OcrPage, OcrWord
-from ragu.core import Answer, Citation, Document, DocumentId, WorkingSet
+from ragu.core import Answer, Citation, Document, DocumentId, EvidenceSpan, WorkingSet
 from ragu.pipeline.grounding import (
-    _evidence_fragments,
     _parse_quotes,
     ground_answer,
     locate,
 )
-
 
 # ── locate() ────────────────────────────────────────────────────────────────
 SRC = "Il tasso\nvariabile è\nindicizzato all'Euribor a 6 mesi."
@@ -46,23 +44,6 @@ def test_locate_rejects_scattered_match() -> None:
     # span (which would yield a giant, wrong highlight).
     scattered = "alpha " + "filler " * 40 + "beta end"
     assert locate(scattered, "alpha beta") is None
-
-
-def test_evidence_fragments_strips_grep_prefixes() -> None:
-    block = (
-        "[2633870.pdf.txt:43: - PERUGINI ANDREA nato a Città di Castello, "
-        "2633870.pdf.txt:314: sul c/c n.8747 a nome di Perugini Andrea]"
-    )
-    frags = _evidence_fragments(block)
-    assert "PERUGINI ANDREA nato a Città di Castello" in frags
-    assert any("c/c n.8747" in f for f in frags)
-    # No leftover "file:lineno:" prefixes.
-    assert not any(".txt:" in f for f in frags)
-
-
-def test_evidence_fragments_extracts_list_print_quotes() -> None:
-    block = "['TASSO INDICE : ', 'EURIBOR MSM LETTERA 6 MESI ', '1,228% ']"
-    assert _evidence_fragments(block) == ["TASSO INDICE :", "EURIBOR MSM LETTERA 6 MESI", "1,228%"]
 
 
 def test_parse_quotes_tolerates_fences_and_prose() -> None:
@@ -230,9 +211,12 @@ async def test_ground_answer_raw_source_needs_no_llm() -> None:
     answer = Answer(
         text="Il tasso applicato è il 2,453%.",
         used_reasoning=True,
-        evidence=(
-            "tasso variabile 2,453% Euribor",  # relevant: shares the number 2,453
-            "clausola generica di rimborso senza dettagli",  # irrelevant -> dropped
+        # Structured grep provenance: each hit already carries its home doc.
+        evidence_spans=(
+            EvidenceSpan(doc_id=DocumentId("rate.pdf"),
+                         text="tasso variabile 2,453% Euribor"),  # shares 2,453
+            EvidenceSpan(doc_id=DocumentId("rate.pdf"),
+                         text="clausola generica di rimborso senza dettagli"),  # dropped
         ),
     )
 
@@ -242,8 +226,29 @@ async def test_ground_answer_raw_source_needs_no_llm() -> None:
     assert len(grounded.citations) == 1
     cit = grounded.citations[0]
     assert "2,453%" in cit.quote
-    assert cit.highlights  # the read line was located + boxed
+    assert cit.highlights  # the grep line was located + boxed
     assert cit.highlights[0].boxes == ((10, 10, 500, 30),)
+
+
+@pytest.mark.asyncio
+async def test_ground_answer_raw_places_span_in_its_own_doc() -> None:
+    # Two near-duplicate docs differing only by the rate. The grep hit is tagged
+    # with rate.pdf, so it must box onto rate.pdf — never the sibling.
+    rate = _rate_doc()
+    sibling = rate.model_copy(update={"id": DocumentId("other.pdf"), "source": "/abs/other.pdf"})
+    answer = Answer(
+        text="Il tasso applicato è il 2,453%.",
+        used_reasoning=True,
+        evidence_spans=(
+            EvidenceSpan(doc_id=DocumentId("rate.pdf"), text="tasso variabile 2,453% Euribor"),
+        ),
+    )
+    ws = WorkingSet(documents=(sibling, rate), token_count=20, truncated=False)
+
+    grounded = await ground_answer(answer, ws, source="raw")
+
+    assert len(grounded.citations) == 1
+    assert grounded.citations[0].doc_id == "rate.pdf"
 
 
 @pytest.mark.asyncio

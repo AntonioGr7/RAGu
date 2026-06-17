@@ -218,9 +218,16 @@ class Ragu:
         *,
         ground: bool | None = None,
         grounding_source: str | None = None,
+        full_corpus: bool = False,
         **query_kwargs: str,
     ) -> Answer:
         """Full pipeline: L1 selects a working set, L2 (vomero) reasons over it.
+
+        When ``full_corpus`` is set, L1 retrieval is skipped and L2 reasons over
+        *every* indexed document — the embedder/vector store are never touched.
+        Only sensible with ``handoff="corpus"`` (L2 navigates the docs as files);
+        inlining the whole corpus into the prompt (``handoff="context"``) would
+        overflow the context window, so that combination is rejected.
 
         When ``ground`` is true (defaults to ``RAGU_VOMERO__GROUND_CITATIONS``),
         an extra LLM pass replaces the document-level citations with span-level
@@ -229,7 +236,9 @@ class Ragu:
         what L2 actually read (``"trajectory"``) or the full document
         (``"document"``). Leave grounding off for the fastest path."""
         query = Query(text=text, **query_kwargs)
-        working_set = await self._working_set(query)
+        working_set = (
+            await self.full_working_set() if full_corpus else await self._working_set(query)
+        )
         answer = await self._ensure_reasoning().reason(query, working_set)
         if ground is None:
             ground = self._settings.vomero.ground_citations
@@ -238,8 +247,10 @@ class Ragu:
             # "raw" needs no LLM (and no API key) — don't build the chat model.
             chat = None if source == "raw" else self._ensure_chat_model()
             answer = await ground_answer(answer, working_set, chat, source=source)
-        # Never hand the (potentially large) raw evidence dumps back to callers.
-        return answer.model_copy(update={"evidence": ()}) if answer.evidence else answer
+        # Never hand the (potentially large) transient evidence back to callers.
+        if answer.evidence or answer.evidence_spans:
+            return answer.model_copy(update={"evidence": (), "evidence_spans": ()})
+        return answer
 
     async def _working_set(self, query: Query) -> WorkingSet:
         result = await self._ensure_retriever().retrieve(
@@ -260,6 +271,21 @@ class Ragu:
             max_tokens=token_budget,
             max_documents=self._settings.retrieval.document_k,
         )
+
+    async def full_working_set(self) -> WorkingSet:
+        """Every indexed document as the working set — the L1-skip path.
+
+        Reasoning over the full corpus only works when L2 navigates the docs as
+        files; inlining them all into the prompt would blow the context window."""
+        if self._settings.vomero.handoff != "corpus":
+            raise ValueError(
+                "full_corpus requires vomero.handoff='corpus' (the whole corpus "
+                f"cannot be inlined into the prompt); got {self._settings.vomero.handoff!r}"
+            )
+        refs = await self._document_store.fingerprints()
+        docs = await self._document_store.get([ref.id for ref in refs])
+        total = sum(self._counter.count(doc.content) for doc in docs)
+        return WorkingSet(documents=tuple(docs), token_count=total, truncated=False)
 
     def _ensure_reasoning(self) -> ReasoningEngine:
         if self._reasoning is None:

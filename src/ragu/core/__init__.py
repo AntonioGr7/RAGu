@@ -6,12 +6,13 @@ configuration object. It is the vocabulary the rest of the system speaks.
 
 from ragu.core.models import (
     Answer,
+    Box,
     Chunk,
     Citation,
-    Box,
     Document,
     DocumentId,
     DocumentRef,
+    EvidenceSpan,
     Highlight,
     IndexReport,
     Query,
@@ -29,6 +30,7 @@ __all__ = [
     "Document",
     "DocumentId",
     "DocumentRef",
+    "EvidenceSpan",
     "Highlight",
     "IndexReport",
     "Query",

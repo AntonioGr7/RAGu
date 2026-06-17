@@ -13,12 +13,24 @@ import pytest
 
 from ragu.adapters.reasoning.vomero import (
     VomeroReasoningEngine,
+    citations_from_provenance,
     citations_from_trajectory,
     corpus_filename,
+    evidence_spans_from_provenance,
     materialize_corpus,
 )
 from ragu.config import VomeroSettings
 from ragu.core import Document, DocumentId, Query, WorkingSet
+
+
+@dataclass
+class AccessEvent:
+    """Mirror of vomero's provenance record (op + doc + located line)."""
+
+    op: str
+    doc: str | int
+    lineno: int | None = None
+    text: str | None = None
 
 
 def _ws() -> WorkingSet:
@@ -74,6 +86,7 @@ class FakeRunResult:
     trajectory: list[Any] = field(default_factory=list)
     tokens: int = 0
     calls: int = 0
+    provenance: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -82,17 +95,28 @@ class FakeStep:
 
 
 class FakeEngine:
-    def __init__(self, captured: dict) -> None:
+    def __init__(self, captured: dict, provenance: list[Any] | None = None) -> None:
         self._captured = captured
+        self._provenance = provenance or []
 
-    def run(self, question: str, source: Any, *, return_trajectory: bool = False) -> FakeRunResult:
+    def run(
+        self,
+        question: str,
+        source: Any,
+        *,
+        return_trajectory: bool = False,
+        on_event: Any = None,
+        ask_handler: Any = None,
+    ) -> FakeRunResult:
         self._captured["question"] = question
         self._captured["source"] = source
+        self._captured["ask_handler"] = ask_handler
         return FakeRunResult(
             answer="The total is 1250.",
             trajectory=[FakeStep(code="corpus.read('invoices/inv1.pdf.txt')")],
             tokens=4321,
             calls=3,
+            provenance=self._provenance,
         )
 
 
@@ -111,3 +135,43 @@ async def test_reason_maps_answer_and_citations() -> None:
     # Citation derived from the file the fake model read.
     assert [c.doc_id for c in answer.citations] == ["invoices/inv1.pdf"]
     assert captured["question"] == "what is the total?"
+
+
+# ── provenance ────────────────────────────────────────────────────────────────
+def test_citations_from_provenance_orders_by_first_touch() -> None:
+    rel_to_doc = {"invoices/inv1.pdf.txt": "invoices/inv1.pdf", "notes/memo.md": "notes/memo.md"}
+    sources = {
+        DocumentId("invoices/inv1.pdf"): "/abs/inv1.pdf",
+        DocumentId("notes/memo.md"): "/abs/memo.md",
+    }
+    prov = [
+        AccessEvent("grep", "notes/memo.md", 3, "total due 1250"),
+        AccessEvent("read", "invoices/inv1.pdf.txt"),
+        AccessEvent("read", "notes/memo.md"),  # already seen — not duplicated
+    ]
+    cites = citations_from_provenance(prov, rel_to_doc, sources, [])
+    assert [c.doc_id for c in cites] == ["notes/memo.md", "invoices/inv1.pdf"]
+    assert cites[0].source == "/abs/memo.md"
+
+
+def test_evidence_spans_from_provenance_keeps_grep_hits_with_doc() -> None:
+    rel_to_doc = {"invoices/inv1.pdf.txt": "invoices/inv1.pdf"}
+    prov = [
+        AccessEvent("grep", "invoices/inv1.pdf.txt", 42, "total 1250"),
+        AccessEvent("read", "invoices/inv1.pdf.txt"),  # not a grep — dropped
+        AccessEvent("grep", "invoices/inv1.pdf.txt", 7, "   "),  # blank — dropped
+    ]
+    spans = evidence_spans_from_provenance(prov, rel_to_doc, {}, [])
+    assert [(str(s.doc_id), s.text) for s in spans] == [("invoices/inv1.pdf", "total 1250")]
+
+
+@pytest.mark.asyncio
+async def test_reason_prefers_provenance_for_citations() -> None:
+    # Provenance points at memo.md even though the trajectory code reads inv1 —
+    # the structured access log wins when present.
+    prov = [AccessEvent("read", "notes/memo.md")]
+    engine = VomeroReasoningEngine(
+        VomeroSettings(handoff="corpus"), engine=FakeEngine({}, provenance=prov)
+    )
+    answer = await engine.reason(Query(text="q"), _ws())
+    assert [c.doc_id for c in answer.citations] == ["notes/memo.md"]

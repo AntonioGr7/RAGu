@@ -15,21 +15,48 @@ vomero — swapping in another RLM means another adapter, nothing else.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import re
 import shutil
 import tempfile
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from ragu.config import VomeroSettings
-from ragu.core import Answer, Citation, Document, Query, WorkingSet
+from ragu.core import Answer, Citation, Document, DocumentId, EvidenceSpan, Query, WorkingSet
+
+
+# When set, this overrides the terminal ask-handler so a non-TTY caller (the web
+# server) can answer L2's clarifying questions itself. ``asyncio.to_thread``
+# copies the current context into the worker thread, so a handler set on the
+# task driving ``reason`` reaches ``_reason_sync`` inside that thread.
+ask_handler_var: contextvars.ContextVar[Callable[[str], str] | None] = (
+    contextvars.ContextVar("ragu_ask_handler", default=None)
+)
+
+# When set, receives each vomero trajectory step as it happens (the same events
+# the ``--verbose`` printer formats). The web server uses this to stream L2's
+# reasoning log live. Like ``ask_handler_var`` it rides ``asyncio.to_thread``'s
+# context copy into the worker thread.
+trace_handler_var: contextvars.ContextVar[Callable[[Any], None] | None] = (
+    contextvars.ContextVar("ragu_trace_handler", default=None)
+)
 
 
 class _Engine(Protocol):
     """The slice of vomero's RLMEngine we use (kept narrow for testability)."""
 
-    def run(self, question: str, source: Any, *, return_trajectory: bool = False) -> Any: ...
+    def run(
+        self,
+        question: str,
+        source: Any,
+        *,
+        return_trajectory: bool = False,
+        on_event: Any = None,
+        ask_handler: Any = None,
+    ) -> Any: ...
 
 
 class VomeroReasoningEngine:
@@ -52,17 +79,43 @@ class VomeroReasoningEngine:
         try:
             rel_to_doc = materialize_corpus(working_set, root)
             source = self._make_source(root, working_set)
-            result = engine.run(query.text, source, return_trajectory=True)
-            answer_text, steps, tokens, calls = _unpack(result)
+            # A caller-supplied trace handler (the web server, streaming the log
+            # live) wins; otherwise print to stderr when verbose.
+            on_event = trace_handler_var.get() or (
+                _trace_printer() if self._settings.verbose else None
+            )
+            # A caller-supplied handler (e.g. the web server, which drives the
+            # question over HTTP) wins; otherwise prompt on the terminal when L2
+            # is interactive and a TTY is present.
+            ask_handler = ask_handler_var.get() or (
+                _terminal_ask_handler() if self._settings.interactive else None
+            )
+            result = engine.run(
+                query.text, source, return_trajectory=True,
+                on_event=on_event, ask_handler=ask_handler,
+            )
+            answer_text, steps, tokens, calls, provenance = _unpack(result)
             sources = {d.id: d.source for d in working_set.documents}
-            citations = citations_from_trajectory(steps, rel_to_doc, sources)
+            # A Context source logs provenance by document *index*; resolve those
+            # back to ids via the working-set order. (Corpus logs by file path.)
+            doc_by_index = [d.id for d in working_set.documents]
+            # Prefer vomero's structured access log; fall back to scanning the
+            # trajectory code when it's empty (e.g. the gVisor backend, whose
+            # in-pod corpus never reaches the host access log).
+            citations = citations_from_provenance(
+                provenance, rel_to_doc, sources, doc_by_index
+            ) or citations_from_trajectory(steps, rel_to_doc, sources)
             return Answer(
                 text=answer_text,
                 citations=tuple(citations),
                 used_reasoning=True,
                 # The text the model actually read (read/grep output) — used by
-                # the grounding pass to anchor citations in the real evidence.
+                # the LLM grounding passes to anchor citations in the real evidence.
                 evidence=evidence_from_trajectory(steps),
+                # Structured grep hits with their home doc — used by "raw" grounding.
+                evidence_spans=evidence_spans_from_provenance(
+                    provenance, rel_to_doc, sources, doc_by_index
+                ),
                 trace={
                     "engine": "vomero",
                     "tokens": str(tokens),
@@ -100,9 +153,82 @@ class VomeroReasoningEngine:
             compact_ratio=s.compact_ratio,
             exec_backend="gvisor" if s.sandbox else "inprocess",
             enable_planning=s.plan,
-            enable_interaction=False,  # no human in the RAG loop
+            enable_interaction=s.interactive,
         )
         return build_engine(settings)
+
+
+def _clip(text: str, n: int) -> str:
+    text = text.replace("\n", " ")
+    return text if len(text) <= n else text[:n] + " …"
+
+
+def format_step(step: Any) -> str | None:
+    """Render one vomero trajectory step as a single human-readable log line, or
+    ``None`` for steps with nothing to show. Shared by the stderr ``--verbose``
+    printer and the web server's live reasoning-log stream so both stay in sync.
+    """
+    tag = f"[d{getattr(step, 'depth', 0)}.{getattr(step, 'index', 0)}]"
+    if getattr(step, "code", None) is not None:
+        return f"{tag} python:\n{step.code}"
+    if getattr(step, "output", None) is not None:
+        return f"{tag} → {_clip(step.output, 1500)}"
+    if getattr(step, "message", None) is not None:
+        return f"{tag} 💬 {_clip(step.message, 500)}"
+    if getattr(step, "llm_call", None) is not None:
+        c = step.llm_call
+        return f"{tag} llm() (+{c.tokens:,} tok) → {_clip(c.response, 300)}"
+    if getattr(step, "usage", None) is not None:
+        u = step.usage
+        return f"{tag} ctx {u.context_tokens:,} tok | total {u.cumulative_tokens:,} tok"
+    if getattr(step, "note", None) is not None:
+        return f"{tag} ⚠ {step.note}"
+    if getattr(step, "final", None) is not None:
+        return f"{tag} FINAL: {_clip(step.final, 1000)}"
+    return None
+
+
+def _trace_printer() -> Callable[[Any], None]:
+    """An ``on_event`` callback that streams vomero's per-step trace to stderr
+    as it reasons — the code L2 runs, the read/grep output, its messages, token
+    usage, and the final answer. Mirrors vomero's own CLI ``--verbose`` view but
+    kept here so the adapter never imports vomero's private CLI helpers.
+
+    Bind stderr now: vomero fires these events from inside ``env.execute()``,
+    which redirects ``sys.stderr`` to capture model output, so a late lookup
+    would land trace lines in that buffer instead of the terminal."""
+    import sys
+
+    stream = sys.stderr
+
+    def clip(text: str, n: int) -> str:
+        text = text.replace("\n", " ")
+        return text if len(text) <= n else text[:n] + " …"
+
+    def emit(step: Any) -> None:
+        pad = "  " * step.depth
+        tag = f"{pad}[d{step.depth}.{step.index}]"
+        if step.code is not None:
+            print(f"\n{tag} python:\n{pad}  " + step.code.replace("\n", "\n" + pad + "  "),
+                  file=stream)
+        elif step.output is not None:
+            print(f"{tag} -> " + clip(step.output, 1500), file=stream)
+        elif step.message is not None:
+            print(f"{tag} 💬 " + clip(step.message, 500), file=stream)
+        elif step.llm_call is not None:
+            c = step.llm_call
+            print(f"{tag} llm() (+{c.tokens:,} tok) -> " + clip(c.response, 300), file=stream)
+        elif step.usage is not None:
+            u = step.usage
+            print(f"{tag} ctx {u.context_tokens:,} tok | total {u.cumulative_tokens:,} tok",
+                  file=stream)
+        elif step.note is not None:
+            print(f"{tag} ⚠ {step.note}", file=stream)
+        elif step.final is not None:
+            print(f"{tag} FINAL: " + clip(step.final, 1000), file=stream)
+        stream.flush()
+
+    return emit
 
 
 def _api_key_from_env() -> str | None:
@@ -176,13 +302,92 @@ def evidence_from_trajectory(steps: list[Any]) -> tuple[str, ...]:
     )
 
 
-def _unpack(result: Any) -> tuple[str, list[Any], int, int]:
+def _resolve_doc_id(
+    doc: Any, rel_to_doc: dict[str, str], doc_by_index: list[Any]
+) -> str | None:
+    """Map a vomero ``AccessEvent.doc`` back to a RAGu document id. A ``Corpus``
+    reports a relative file path (look up in ``rel_to_doc``); a ``Context``
+    reports a document index into the working set (look up by position)."""
+    if isinstance(doc, int):
+        return str(doc_by_index[doc]) if 0 <= doc < len(doc_by_index) else None
+    return rel_to_doc.get(doc)
+
+
+def citations_from_provenance(
+    provenance: list[Any],
+    rel_to_doc: dict[str, str],
+    sources: dict[Any, str],
+    doc_by_index: list[Any],
+) -> list[Citation]:
+    """Document-level citations from vomero's structured access log: every
+    document the model read, peeked, or grep'd is cited, in order of first
+    touch. More reliable than scanning REPL code — it's what vomero recorded it
+    actually retrieved. Empty when no access log is available."""
+    cited: list[Citation] = []
+    seen: set[str] = set()
+    for event in provenance:
+        if getattr(event, "op", None) not in ("read", "peek", "grep"):
+            continue
+        doc_id = _resolve_doc_id(event.doc, rel_to_doc, doc_by_index)
+        if doc_id is None or doc_id in seen:
+            continue
+        seen.add(doc_id)
+        cited.append(
+            Citation(doc_id=DocumentId(doc_id), source=sources.get(DocumentId(doc_id), doc_id))
+        )
+    return cited
+
+
+def evidence_spans_from_provenance(
+    provenance: list[Any],
+    rel_to_doc: dict[str, str],
+    sources: dict[Any, str],
+    doc_by_index: list[Any],
+) -> tuple[EvidenceSpan, ...]:
+    """The grep hits from vomero's access log, each tagged with its home doc.
+    These are clean source fragments (no REPL stdout to strip) that "raw"
+    grounding places straight into their own document."""
+    spans: list[EvidenceSpan] = []
+    for event in provenance:
+        if getattr(event, "op", None) != "grep":
+            continue
+        text = (getattr(event, "text", None) or "").strip()
+        if not text:
+            continue
+        doc_id = _resolve_doc_id(event.doc, rel_to_doc, doc_by_index)
+        if doc_id is None:
+            continue
+        spans.append(EvidenceSpan(doc_id=DocumentId(doc_id), text=text))
+    return tuple(spans)
+
+
+def _terminal_ask_handler() -> Callable[[str], str] | None:
+    """An ``ask_handler`` that prompts the user on the terminal when L2 needs a
+    clarification — but only when stdin/stdout are a real TTY. Headless (server,
+    eval, piped) there's no human, so we return ``None`` and let vomero degrade
+    gracefully (it proceeds with its best judgment instead of hanging)."""
+    import sys
+
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return None
+
+    def ask(question: str) -> str:
+        print(f"\n❓ L2 needs your input:\n   {question}\n   > ", end="",
+              file=sys.stderr, flush=True)
+        line = sys.stdin.readline()
+        return line.rstrip("\n") if line else "(no answer provided)"
+
+    return ask
+
+
+def _unpack(result: Any) -> tuple[str, list[Any], int, int, list[Any]]:
     """Normalize vomero's run output (RunResult or bare string)."""
     if isinstance(result, str):
-        return result, [], 0, 0
+        return result, [], 0, 0, []
     return (
         getattr(result, "answer", str(result)),
         list(getattr(result, "trajectory", [])),
         int(getattr(result, "tokens", 0)),
         int(getattr(result, "calls", 0)),
+        list(getattr(result, "provenance", []) or []),
     )

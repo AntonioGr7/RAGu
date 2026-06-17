@@ -67,6 +67,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="debug: render cited pages with their boxes drawn into DIR. Implies --cite.",
     )
+    p_answer.add_argument(
+        "--full-corpus",
+        action="store_true",
+        help="skip L1 retrieval: L2 reasons over every indexed document "
+        "(needs vomero handoff='corpus')",
+    )
 
     p_extract = sub.add_parser(
         "extract", help="extract text (incl. OCR) from a folder into another folder"
@@ -106,7 +112,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "answer":
         ground = args.cite or args.cite_source is not None or args.cite_images is not None or None
         answer = asyncio.run(
-            Ragu().answer(args.query, ground=ground, grounding_source=args.cite_source)
+            Ragu().answer(
+                args.query,
+                ground=ground,
+                grounding_source=args.cite_source,
+                full_corpus=args.full_corpus,
+            )
         )
         print(answer.text)
         if answer.citations:
