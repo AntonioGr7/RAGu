@@ -8,6 +8,7 @@ this same object once the engine adapter lands.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 from ragu.adapters.ingestion import (
@@ -43,6 +44,8 @@ from ragu.factory import (
 from ragu.pipeline import Indexer, build_working_set
 from ragu.pipeline.grounding import ground_answer
 from ragu.ports import ChatModel, Embedder, ReasoningEngine, Retriever, VectorStore
+
+logger = logging.getLogger(__name__)
 
 
 def _is_under(path: Path, root: Path) -> bool:
@@ -347,8 +350,12 @@ class Ragu:
         Returns a human-readable status for the boot log, or ``None`` when there
         is nothing to warm (L1+L2 mode reasons over small per-query sets, so the
         cost isn't worth paying up front)."""
+        v = self._settings.vomero
+        logger.info("L2 (vomero) limits — max_depth=%s, max_steps=%s", v.max_depth, v.max_steps)
         if not self.full_corpus_default:
             return None
+        logger.info("L2 warmup: assembling the full corpus and search index "
+                    "(first launch builds it; this can take a moment)…")
         ws = await self.full_working_set()
         warm = getattr(self._ensure_reasoning(), "warmup", None)
         if warm is None:

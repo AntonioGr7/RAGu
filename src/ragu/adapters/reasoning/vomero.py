@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextvars
+import logging
 import os
 import re
 import shutil
@@ -28,6 +29,8 @@ from typing import Any, Protocol
 
 from ragu.config import VomeroSettings
 from ragu.core import Answer, Citation, Document, DocumentId, EvidenceSpan, Query, WorkingSet
+
+logger = logging.getLogger(__name__)
 
 
 # When set, this overrides the terminal ask-handler so a non-TTY caller (the web
@@ -116,10 +119,13 @@ class VomeroReasoningEngine:
     async def reason(self, query: Query, working_set: WorkingSet) -> Answer:
         return await asyncio.to_thread(self._reason_sync, query, working_set)
 
-    def _corpus_dir(self, working_set: WorkingSet) -> tuple[Path, dict[str, str]]:
+    def _corpus_dir(
+        self, working_set: WorkingSet, *, progress: bool = False
+    ) -> tuple[Path, dict[str, str]]:
         """Materialize ``working_set`` to a temp dir, reusing the one written for
         a previous identical working set (the common full-corpus case) instead of
-        rewriting every document. A changed working set evicts the stale dir."""
+        rewriting every document. A changed working set evicts the stale dir.
+        ``progress`` shows a write bar (used at warmup, not per-turn)."""
         signature = frozenset(str(d.id) for d in working_set.documents)
         key = id(working_set)
         with self._corpus_lock:
@@ -130,7 +136,7 @@ class VomeroReasoningEngine:
                 shutil.rmtree(root, ignore_errors=True)
                 self._corpus_cache = None
             root = Path(tempfile.mkdtemp(prefix="ragu-corpus-"))
-            rel_to_doc = materialize_corpus(working_set, root)
+            rel_to_doc = materialize_corpus(working_set, root, progress=progress)
             self._corpus_cache = (key, signature, root, rel_to_doc)
             return root, rel_to_doc
 
@@ -162,8 +168,13 @@ class VomeroReasoningEngine:
             if self._indexed_signature == signature and PersistentIndex.exists(d):
                 return d
             docs = [(corpus_filename(doc), doc.content) for doc in working_set.documents]
-            if not (PersistentIndex.exists(d) and not PersistentIndex(d).is_stale(docs)):
+            if PersistentIndex.exists(d) and not PersistentIndex(d).is_stale(docs):
+                logger.info("L2 search index up to date (%d docs) — %s", len(docs), d)
+            else:
+                logger.info("L2 search index: building lexical index over %d docs → %s",
+                            len(docs), d)
                 PersistentIndex.build(docs, d)  # lexical-only (no embedder)
+                logger.info("L2 search index built.")
             self._indexed_signature = signature
             return d
 
@@ -171,7 +182,7 @@ class VomeroReasoningEngine:
         """Pay the corpus materialization + search-index build now (server
         startup) instead of on the first user's question, and prime the read-only
         index. Returns a human-readable status for the boot log."""
-        root, _ = self._corpus_dir(working_set)  # materialize once (cached)
+        root, _ = self._corpus_dir(working_set, progress=True)  # materialize once (cached)
         index_dir = self._ensure_search_index(working_set)
         if index_dir is None:
             # Search disabled (or set too small for a persistent index): the
@@ -366,19 +377,44 @@ def corpus_filename(doc: Document) -> str:
     return rel if Path(rel).suffix.lower() in text_exts else f"{rel}.txt"
 
 
-def materialize_corpus(working_set: WorkingSet, root: Path) -> dict[str, str]:
+def materialize_corpus(
+    working_set: WorkingSet, root: Path, *, progress: bool = False
+) -> dict[str, str]:
     """Write each working-set document into ``root`` as a text file.
 
     Returns a mapping of corpus-relative path -> document id, used to turn the
-    files vomero touched back into citations."""
+    files vomero touched back into citations. With ``progress=True`` a tqdm bar
+    tracks the write — worth it for the full corpus (tens of thousands of files)
+    at server warmup, where the wait is otherwise silent."""
     rel_to_doc: dict[str, str] = {}
+    bar = _progress_bar(len(working_set.documents), enabled=progress, desc="Materializing corpus")
     for doc in working_set.documents:
         name = corpus_filename(doc)
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(doc.content, encoding="utf-8")
         rel_to_doc[name] = str(doc.id)
+        bar.update(1)
+    bar.close()
     return rel_to_doc
+
+
+class _NullBar:
+    """No-op stand-in for tqdm when progress is disabled or tqdm is missing."""
+
+    def update(self, _n: int = 1) -> None: ...
+    def close(self) -> None: ...
+
+
+def _progress_bar(total: int, *, enabled: bool, desc: str):
+    """A tqdm bar of ``total`` items, or a no-op bar when disabled/unavailable."""
+    if not enabled:
+        return _NullBar()
+    try:
+        from tqdm import tqdm
+    except ImportError:  # pragma: no cover - tqdm ships with the 'ocr' extra
+        return _NullBar()
+    return tqdm(total=total, unit="doc", desc=desc)
 
 
 def citations_from_trajectory(
