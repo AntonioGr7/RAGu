@@ -43,7 +43,7 @@ export function ReferencesPanel({ turn, onOpenCitation }: Props) {
 
           <div className="refs-section">
             <div className="panel-title">
-              Working set <span className="panel-count">{turn.working_set.length}</span>
+              Working set <span className="panel-count">{turn.working_set_count}</span>
             </div>
             <div className="ws-list">
               {turn.working_set.map((d) => (
@@ -56,6 +56,11 @@ export function ReferencesPanel({ turn, onOpenCitation }: Props) {
                   {cited.has(d.id) && <span className="ws-tag">cited</span>}
                 </div>
               ))}
+              {turn.working_set_count > turn.working_set.length && (
+                <div className="ws-doc ws-more">
+                  … and {turn.working_set_count - turn.working_set.length} more
+                </div>
+              )}
             </div>
           </div>
         </>

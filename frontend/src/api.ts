@@ -32,7 +32,8 @@ export interface AnswerTurn {
   used_reasoning: boolean;
   trace: Record<string, string>;
   citations: Citation[];
-  working_set: WorkingDoc[];
+  working_set: WorkingDoc[]; // capped sample (cited docs first) — see working_set_count
+  working_set_count: number; // true size of the working set (the whole corpus in full-corpus mode)
   elapsed_ms: number;
   reasoning_log: string[]; // L2's full step-by-step log for this answer
 }

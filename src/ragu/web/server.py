@@ -97,16 +97,31 @@ def _citation_json(c: Citation) -> dict:
     }
 
 
+# Cap how many working-set docs we serialise to the client. In full-corpus mode
+# the working set is the entire index (100k+ docs); shipping and rendering all of
+# them froze the browser. The panel only needs the cited docs plus a sample — the
+# true total rides along as ``working_set_count``.
+_WORKING_SET_LIMIT = 50
+
+
 def _answer_json(answer: Answer, working_set: WorkingSet, elapsed_ms: int) -> dict:
+    cited = {str(c.doc_id) for c in answer.citations}
+    # Cited docs first (so they always survive the cap and show their tag), then
+    # fill to the limit with others — never materialise the whole list.
+    shown: list = [d for d in working_set.documents if str(d.id) in cited]
+    for d in working_set.documents:
+        if len(shown) >= _WORKING_SET_LIMIT:
+            break
+        if str(d.id) not in cited:
+            shown.append(d)
     return {
         "type": "answer",
         "answer": answer.text,
         "used_reasoning": answer.used_reasoning,
         "trace": answer.trace,
         "citations": [_citation_json(c) for c in answer.citations],
-        "working_set": [
-            {"id": str(d.id), "source": d.source} for d in working_set.documents
-        ],
+        "working_set": [{"id": str(d.id), "source": d.source} for d in shown],
+        "working_set_count": len(working_set.documents),
         "elapsed_ms": elapsed_ms,
     }
 
