@@ -198,10 +198,12 @@ class VomeroReasoningEngine:
         root, rel_to_doc = self._corpus_dir(working_set)
         source = self._make_source(root, working_set)
         # A caller-supplied trace handler (the web server, streaming the log
-        # live) wins; otherwise print to stderr when verbose.
-        on_event = trace_handler_var.get() or (
-            _trace_printer() if self._settings.verbose else None
-        )
+        # live to the UI) and the verbose stderr printer are not exclusive: when
+        # both apply, fan out to both so the server operator still sees progress
+        # in the terminal during a long run. Either alone is used directly.
+        handler = trace_handler_var.get()
+        printer = _trace_printer() if self._settings.verbose else None
+        on_event = _fan_out(handler, printer)
         # A caller-supplied handler (e.g. the web server, which drives the
         # question over HTTP) wins; otherwise prompt on the terminal when L2
         # is interactive and a TTY is present.
@@ -309,6 +311,23 @@ def format_step(step: Any) -> str | None:
     if getattr(step, "final", None) is not None:
         return f"{tag} FINAL: {_clip(step.final, 1000)}"
     return None
+
+
+def _fan_out(*handlers: Callable[[Any], None] | None) -> Callable[[Any], None] | None:
+    """Combine zero or more step handlers into one, or ``None`` if all are absent.
+    Lets a run send each trajectory step to several sinks (e.g. the web UI stream
+    *and* the verbose stderr printer) instead of only the first."""
+    active = [h for h in handlers if h is not None]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+
+    def emit(step: Any) -> None:
+        for h in active:
+            h(step)
+
+    return emit
 
 
 def _trace_printer() -> Callable[[Any], None]:
