@@ -1,14 +1,23 @@
 # RAGu
 
-A two-level RAG system.
+**Agentic RAG over your whole corpus.** Instead of retrieving a handful of chunks
+and stuffing them into a prompt, RAGu hands the *entire* indexed corpus to an
+agentic reasoning engine ([vomero](https://github.com/AntonioGr7/vomero)) that
+navigates it the way a person would — ranked search, grep, read, recurse,
+multi-hop — and answers with citations. The model decides what evidence it needs,
+so retrieval recall never caps the answer. This is the default and the point:
+**maximum expressivity**, which matters most for multi-hop questions whose
+final-hop evidence isn't anywhere near the raw query.
 
-- **L1 — Retrieval (working-set selector).** Hybrid dense + BM25 retrieval with
-  contextual-retrieval chunking. Its job is *not* to find the answer but to
-  narrow a large corpus to the documents worth reasoning over. Chunks roll up to
-  their parent documents (document-level recall is the target).
-- **L2 — Reasoning (agentic RLM).** An agentic engine ([vomero](https://github.com/AntonioGr7/vomero),
-  isolated behind a port) navigates the selected working set — grep/read/recurse/
-  multihop — and answers with citations. Invoked only when a query needs it.
+- **L2 — Reasoning (the main path).** The agentic engine (vomero, isolated behind
+  a `ReasoningEngine` port) reasons over the full corpus: it `search()`es
+  (hybrid BM25 ranked retrieval, built-in), `grep`s, reads, and recurses, then
+  answers with document-level citations — span-level with grounding on.
+- **L1 — Retrieval (optional pre-filter).** Hybrid dense + BM25 retrieval with
+  contextual-retrieval chunking that narrows the corpus to a working set *before*
+  L2 reasons. Off by default — turn it on when the corpus is large but the
+  questions are simple and don't need full agentic navigation. Its job is never
+  to find the answer, only to shrink what L2 looks at.
 
 All LLM access goes through a generic `ChatModel` port, so every model-backed
 feature works with **OpenAI, any OpenAI-compatible server, or Gemini** — the
@@ -137,9 +146,9 @@ ragu show <doc_id> --json # the whole record as JSON, incl. OCR geometry
 `list`/`show` only touch the document store, so they're fast — they don't load
 the embedder.
 
-## Retrieving (L1)
+## Retrieving (L1, optional)
 
-Select a working set without generating an answer:
+L1 is the optional pre-filter. Select a working set without generating an answer:
 
 ```bash
 ragu retrieve "what blocks P-BEACON?"
@@ -152,18 +161,36 @@ Working set: 3 docs, 48210 tokens (truncated=False)
   ...
 ```
 
-## Answering (L1 + L2)
+## Answering (agentic, full-corpus by default)
 
 ```bash
 ragu answer "what blocks P-BEACON?"          # needs the `l2` extra + an LLM key
 ragu answer "what blocks P-BEACON?" --cite   # also produce inline citations (below)
 ```
 
-L2 reasoning is [vomero](https://github.com/AntonioGr7/vomero) behind the
-`ReasoningEngine` port. RAGu materializes the L1 working set as a temporary
-corpus, vomero navigates it agentically (grep/read/recurse), and the answer comes
-back with citations for the documents it used. Configure via `RAGU_VOMERO__*`
+By default L2 reasons over the **entire** indexed corpus — L1 retrieval is
+skipped, so dense recall never becomes the ceiling. RAGu materializes the corpus
+as a folder of files, and [vomero](https://github.com/AntonioGr7/vomero) (behind
+the `ReasoningEngine` port) navigates it agentically — `search()` (built-in
+hybrid BM25 ranked retrieval), `grep`, read, recurse, multi-hop — answering with
+citations for the documents it used. Configure via `RAGU_VOMERO__*`
 (provider/model/base_url/limits).
+
+**Pre-filter with L1 for simple sets.** When the corpus is large but the
+questions don't need full agentic navigation, narrow it with L1 first:
+
+```bash
+ragu answer "what blocks P-BEACON?" --no-full-corpus   # L1 selects a working set, then L2 reasons over it
+```
+
+or globally with `RAGU_VOMERO__FULL_CORPUS=false`. Either way it's a per-query
+choice — the same corpus serves both paths.
+
+> **Search index.** L2's `search()` is backed by a persistent lexical index
+> (SQLite FTS5) built once from the corpus and opened read-only, so the first
+> question isn't slow. It lives next to the LanceDB store by default
+> (`RAGU_VOMERO__SEARCH_INDEX_DIR`; set `off` to disable). The web server warms
+> it at startup.
 
 ### Inline citations (`--cite`)
 
@@ -236,9 +263,9 @@ for ref in await ragu.list_documents():     # lightweight: id, source, hash
     print(ref.id)
 doc = await ragu.get_document("design.pdf")  # full content + metadata + artifacts
 
-# retrieve (L1) and answer (L1 + L2)
-ws = await ragu.retrieve("what blocks P-BEACON?")
+# answer over the full corpus (default); pass full_corpus=False to pre-filter with L1
 answer = await ragu.answer("what blocks P-BEACON?", ground=True)
+ws = await ragu.retrieve("what blocks P-BEACON?")   # L1 only, when you want the working set
 for c in answer.citations:
     print(c.doc_id, c.quote)
     for h in c.highlights:                   # page + boxes, when grounded

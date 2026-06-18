@@ -24,8 +24,10 @@ export function App() {
   const [sessionId, setSessionId] = useState(newSessionId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [grounding, setGrounding] = useState<GroundingSource>("trajectory");
-  // L1 off by default: L2 reasons over the whole corpus (matches the server's
-  // RAGU_VOMERO__FULL_CORPUS default). Uncheck to use the L1+L2 retrieval pipeline.
+  // Default = max expressivity: the engine reasons agentically over the WHOLE
+  // corpus (matches the server's RAGU_VOMERO__FULL_CORPUS default). Enable the
+  // "L1 filter" pill (=> fullCorpus false) to pre-narrow with L1 retrieval first,
+  // for simple sets that don't need full agentic navigation.
   const [fullCorpus, setFullCorpus] = useState(true);
   const [pending, setPending] = useState(false);
   // True while L2 is waiting on the user — the composer answers the question.

@@ -61,13 +61,14 @@ async function postTurn(path: string, body: unknown): Promise<TurnResult> {
   return res.json();
 }
 
-// Start a new turn for a session (a fresh L1+L2 run over the corpus). When
-// fullCorpus is set, L1 retrieval is skipped and L2 reasons over every document.
+// Start a new turn for a session. By default (fullCorpus true) the engine reasons
+// agentically over the whole corpus; pass fullCorpus=false to pre-filter with the
+// L1 retrieval pipeline first (for simple sets).
 export function sendMessage(
   sessionId: string,
   message: string,
   groundingSource: GroundingSource,
-  fullCorpus = false,
+  fullCorpus = true,
 ): Promise<TurnResult> {
   return postTurn("/api/chat", {
     session_id: sessionId,

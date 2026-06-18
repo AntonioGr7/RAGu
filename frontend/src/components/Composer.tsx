@@ -101,12 +101,12 @@ export function Composer({
           ))}
         </div>
         <button
-          className={`pill ${fullCorpus ? "pill-on" : ""}`}
-          title="Skip L1 retrieval — let L2 reason over every indexed document"
+          className={`pill ${!fullCorpus ? "pill-on" : ""}`}
+          title="Pre-filter the corpus with L1 retrieval (hybrid dense + BM25) before reasoning — for simple sets that don't need full agentic navigation. Off (default): the engine reasons over the whole corpus."
           onClick={() => onFullCorpusChange(!fullCorpus)}
           disabled={awaitingQuestion}
         >
-          full corpus
+          L1 filter
         </button>
       </div>
     </div>

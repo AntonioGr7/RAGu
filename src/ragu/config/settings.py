@@ -162,13 +162,14 @@ class VomeroSettings(BaseModel):
     # and is what enables document-level citations.
     handoff: str = "corpus"
 
-    # Skip L1 retrieval by default: hand vomero the *entire* indexed corpus and
-    # let it navigate (grep/read/recurse) over everything, rather than a
-    # retrieved working set. On by default — L2 does its own retrieval, so dense
-    # L1 never becomes the recall ceiling (notably for multi-hop questions whose
-    # final-hop evidence isn't near the raw query). Requires handoff="corpus"
-    # (the whole corpus can't be inlined into the prompt). Set False to restore
-    # the L1+L2 pipeline. Callers may still override per-request.
+    # The main approach: hand vomero the *entire* indexed corpus and let it
+    # navigate (search/grep/read/recurse) over everything, rather than a
+    # pre-retrieved working set — maximum expressivity. On by default because L2
+    # does its own retrieval, so dense L1 never becomes the recall ceiling
+    # (notably for multi-hop questions whose final-hop evidence isn't near the
+    # raw query). Requires handoff="corpus" (the whole corpus can't be inlined
+    # into the prompt). Set False to pre-filter with the L1+L2 pipeline first —
+    # fine when the set is simple and isn't multi-hop. Overridable per-request.
     full_corpus: bool = True
 
     # Persistent lexical search index (vomero's PersistentIndex: SQLite FTS5)

@@ -1,1 +1,1 @@
-{"root":["./src/App.tsx","./src/api.ts","./src/main.tsx","./src/components/AnswerPanel.tsx","./src/components/CitationCard.tsx","./src/components/PageViewer.tsx","./src/components/QueryBar.tsx","./src/components/TracePanel.tsx","./src/components/WorkingSet.tsx"],"version":"5.9.3"}
+{"root":["./src/App.tsx","./src/api.ts","./src/main.tsx","./src/components/ChatThread.tsx","./src/components/CitationCard.tsx","./src/components/Composer.tsx","./src/components/PageViewer.tsx","./src/components/ReferencesPanel.tsx","./src/components/TraceBox.tsx"],"version":"5.9.3"}
