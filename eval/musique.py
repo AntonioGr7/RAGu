@@ -258,7 +258,9 @@ async def cmd_run(args: argparse.Namespace) -> None:
             ws = await ragu.retrieve(q)
             ws_ids = {str(d) for d in ws.doc_ids}
             recall = len(gold_support & ws_ids) / len(gold_support) if gold_support else None
-            ans = await ragu.answer(q + CONCISE, ground=False)
+            # Pin the L1+L2 pipeline: this harness measures L1 retrieval recall,
+            # so it must not fall back to the full-corpus default.
+            ans = await ragu.answer(q + CONCISE, ground=False, full_corpus=False)
             dt = time.perf_counter() - t0
         em, f1, contains = score(ans.text, golds)
         return {

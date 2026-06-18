@@ -7,6 +7,7 @@ this same object once the engine adapter lands.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from ragu.adapters.ingestion import (
@@ -25,6 +26,7 @@ from ragu.core import (
     DocumentRef,
     IndexReport,
     Query,
+    ScoredDocument,
     WorkingSet,
 )
 from ragu.factory import (
@@ -63,6 +65,10 @@ class Ragu:
         self._chat_model: ChatModel | None = None
         self._ocr: OcrEngine | None = None
         self._reasoning: ReasoningEngine | None = None  # built lazily (needs vomero)
+        # The full-corpus working set (the L1-skip path) is the same every turn
+        # and every session, so it is loaded from the store and assembled once,
+        # then reused. Invalidated whenever indexing changes the corpus.
+        self._full_corpus_ws: WorkingSet | None = None
 
     def _ensure_chat_model(self) -> ChatModel:
         if self._chat_model is None:
@@ -170,9 +176,12 @@ class Ragu:
         if dead:
             await self._ensure_vector_store().delete(dead)
             await self._document_store.delete(dead)
+            self._full_corpus_ws = None  # corpus shrank — drop the cached set
         return len(dead)
 
     async def index_documents(self, documents: list[Document]) -> int:
+        if documents:
+            self._full_corpus_ws = None  # corpus changed — drop the cached set
         return await self._ensure_indexer().index(documents)
 
     def extract_paths(self, paths: list[str | Path], out_dir: str | Path) -> int:
@@ -208,9 +217,23 @@ class Ragu:
         order; ids with no stored document are skipped."""
         return await self._document_store.get([DocumentId(str(i)) for i in doc_ids])
 
-    async def retrieve(self, text: str, **query_kwargs: str) -> WorkingSet:
-        """Run L1 and assemble the token-bounded working set for the query."""
-        return await self._working_set(Query(text=text, **query_kwargs))
+    @property
+    def full_corpus_default(self) -> bool:
+        """Whether L1 is skipped by default — L2 reasons over the whole corpus
+        (``RAGU_VOMERO__FULL_CORPUS``). Lets the web server pick the retrieval
+        path before it builds the working set."""
+        return self._settings.vomero.full_corpus
+
+    async def retrieve(
+        self, text: str, *, prior: WorkingSet | None = None, **query_kwargs: str
+    ) -> WorkingSet:
+        """Run L1 and assemble the token-bounded working set for the query.
+
+        When ``prior`` is given (a previous turn's working set in the same
+        session), its documents are carried forward and merged with this query's
+        hits — so a follow-up keeps the evidence that grounded earlier answers
+        instead of retrieving cold from the latest message alone."""
+        return await self._working_set(Query(text=text, **query_kwargs), prior=prior)
 
     async def answer(
         self,
@@ -218,16 +241,19 @@ class Ragu:
         *,
         ground: bool | None = None,
         grounding_source: str | None = None,
-        full_corpus: bool = False,
+        full_corpus: bool | None = None,
+        working_set: WorkingSet | None = None,
         **query_kwargs: str,
     ) -> Answer:
         """Full pipeline: L1 selects a working set, L2 (vomero) reasons over it.
 
-        When ``full_corpus`` is set, L1 retrieval is skipped and L2 reasons over
-        *every* indexed document — the embedder/vector store are never touched.
-        Only sensible with ``handoff="corpus"`` (L2 navigates the docs as files);
-        inlining the whole corpus into the prompt (``handoff="context"``) would
-        overflow the context window, so that combination is rejected.
+        When ``full_corpus`` is set (defaults to ``RAGU_VOMERO__FULL_CORPUS``,
+        on), L1 retrieval is skipped and L2 reasons over *every* indexed document
+        — the embedder/vector store are never touched. Only sensible with
+        ``handoff="corpus"`` (L2 navigates the docs as files); inlining the whole
+        corpus into the prompt (``handoff="context"``) would overflow the context
+        window, so that combination is rejected. Pass ``full_corpus=False`` to
+        force the L1+L2 pipeline regardless of config.
 
         When ``ground`` is true (defaults to ``RAGU_VOMERO__GROUND_CITATIONS``),
         an extra LLM pass replaces the document-level citations with span-level
@@ -236,9 +262,15 @@ class Ragu:
         what L2 actually read (``"trajectory"``) or the full document
         (``"document"``). Leave grounding off for the fastest path."""
         query = Query(text=text, **query_kwargs)
-        working_set = (
-            await self.full_working_set() if full_corpus else await self._working_set(query)
-        )
+        if full_corpus is None:
+            full_corpus = self._settings.vomero.full_corpus
+        # A caller (the web server) may pass a pre-built working set — e.g. one
+        # assembled with conversation-aware retrieval and carried across turns.
+        # Otherwise build it here from this query alone.
+        if working_set is None:
+            working_set = (
+                await self.full_working_set() if full_corpus else await self._working_set(query)
+            )
         answer = await self._ensure_reasoning().reason(query, working_set)
         if ground is None:
             ground = self._settings.vomero.ground_citations
@@ -252,11 +284,24 @@ class Ragu:
             return answer.model_copy(update={"evidence": (), "evidence_spans": ()})
         return answer
 
-    async def _working_set(self, query: Query) -> WorkingSet:
+    async def _working_set(
+        self, query: Query, *, prior: WorkingSet | None = None
+    ) -> WorkingSet:
         result = await self._ensure_retriever().retrieve(
             query, k=self._settings.retrieval.candidate_k
         )
         ranked = result.to_documents()
+        if prior is not None and prior.documents:
+            # Accumulate across turns: this query's fresh hits lead (so the
+            # document-count cap can't evict the new hop's evidence), then carry
+            # forward prior-turn documents that weren't re-retrieved. A follow-up
+            # thus never loses the evidence that grounded the earlier answer.
+            have = {d.doc_id for d in ranked}
+            ranked = ranked + [
+                ScoredDocument(doc_id=did, score=0.0, hits=())
+                for did in prior.doc_ids
+                if did not in have
+            ]
         # In corpus handoff L2 navigates the docs as files, so the token budget
         # (a context-window concern) doesn't apply — bound by document count only.
         token_budget = (
@@ -282,10 +327,33 @@ class Ragu:
                 "full_corpus requires vomero.handoff='corpus' (the whole corpus "
                 f"cannot be inlined into the prompt); got {self._settings.vomero.handoff!r}"
             )
-        refs = await self._document_store.fingerprints()
-        docs = await self._document_store.get([ref.id for ref in refs])
-        total = sum(self._counter.count(doc.content) for doc in docs)
-        return WorkingSet(documents=tuple(docs), token_count=total, truncated=False)
+        if self._full_corpus_ws is None:
+            refs = await self._document_store.fingerprints()
+            docs = await self._document_store.get([ref.id for ref in refs])
+            # Corpus handoff lets L2 navigate the docs as files, so the token
+            # count never bounds anything here — skip the full-corpus tiktoken
+            # pass (it would re-tokenize every document on every turn for a
+            # number nothing reads in this path).
+            self._full_corpus_ws = WorkingSet(
+                documents=tuple(docs), token_count=0, truncated=False
+            )
+        return self._full_corpus_ws
+
+    async def warmup(self) -> str | None:
+        """Prepare L2 to answer the first question fast: in full-corpus mode,
+        assemble the corpus working set and build/open L2's persistent search
+        index now (at server startup) rather than on the first user's request.
+
+        Returns a human-readable status for the boot log, or ``None`` when there
+        is nothing to warm (L1+L2 mode reasons over small per-query sets, so the
+        cost isn't worth paying up front)."""
+        if not self.full_corpus_default:
+            return None
+        ws = await self.full_working_set()
+        warm = getattr(self._ensure_reasoning(), "warmup", None)
+        if warm is None:
+            return None
+        return await asyncio.to_thread(warm, ws)
 
     def _ensure_reasoning(self) -> ReasoningEngine:
         if self._reasoning is None:

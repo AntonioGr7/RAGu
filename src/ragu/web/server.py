@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import logging
 import queue
 import time
@@ -35,7 +34,12 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from ragu.adapters.reasoning.vomero import ask_handler_var, format_step, trace_handler_var
+from ragu.adapters.reasoning.vomero import (
+    ask_handler_var,
+    format_step,
+    trace_handler_var,
+    transcript_var,
+)
 from ragu.app import Ragu
 from ragu.core import Answer, Citation, WorkingSet
 
@@ -48,7 +52,9 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     grounding_source: str = "trajectory"  # trajectory | document | raw
-    full_corpus: bool = False  # skip L1; L2 reasons over every indexed document
+    # Skip L1; L2 reasons over every indexed document. None => use the server's
+    # configured default (RAGU_VOMERO__FULL_CORPUS, on).
+    full_corpus: bool | None = None
 
 
 class RespondRequest(BaseModel):
@@ -111,7 +117,8 @@ class _Turn:
     HTTP layer with two thread-safe queues."""
 
     def __init__(
-        self, session_id: str, message: str, grounding_source: str, full_corpus: bool = False
+        self, session_id: str, message: str, grounding_source: str,
+        full_corpus: bool | None = None,
     ) -> None:
         self.session_id = session_id
         self.message = message
@@ -164,6 +171,17 @@ def create_app() -> "FastAPI":  # type: ignore[name-defined]  # noqa: F821
     turn_lock = asyncio.Lock()
     # In-flight turn per session (absent when the session is idle).
     turns: dict[str, _Turn] = {}
+    # Conversation transcript per session — vomero's resumable history, mutated
+    # in place each turn so follow-ups build on what was already asked/answered.
+    # Created on first turn, chained across turns, dropped on reset.
+    transcripts: dict[str, list] = {}
+    # Per-session retrieval continuity: the working set assembled last turn (so a
+    # follow-up accumulates evidence instead of retrieving cold) and the previous
+    # (question, answer) used to make follow-up retrieval conversation-aware — a
+    # multi-hop follow-up retrieves over the resolved intermediate answers, not
+    # just the latest message. Both dropped on reset.
+    working_sets: dict[str, WorkingSet] = {}
+    last_qa: dict[str, tuple[str, str]] = {}
     # Sources we have indexed — the only paths /api/page is allowed to render
     # (so a crafted ?source= can't read arbitrary files off disk).
     allowed_sources: set[str] = set()
@@ -176,6 +194,15 @@ def create_app() -> "FastAPI":  # type: ignore[name-defined]  # noqa: F821
     @app.on_event("startup")
     async def _startup() -> None:
         await _refresh_allowed_sources()
+        # Build/open L2's search index (and materialize the full corpus) now, so
+        # the first question isn't slow. Best-effort: a warmup failure must not
+        # stop the server from booting.
+        try:
+            status = await ragu.warmup()
+            if status:
+                logger.info("L2 search warmed — %s.", status)
+        except Exception:
+            logger.exception("L2 warmup failed (continuing; first query pays the cost)")
         logger.info("RAGu web ready — %d document(s) indexed.", len(allowed_sources))
 
     async def _run(turn: _Turn) -> None:
@@ -184,20 +211,43 @@ def create_app() -> "FastAPI":  # type: ignore[name-defined]  # noqa: F821
         async with turn_lock:
             ask_handler_var.set(turn.ask)
             trace_handler_var.set(turn.on_event)
+            # Chain this session's prior turns in (and capture this turn into the
+            # same list) so L2 answers follow-ups in the conversation's context.
+            transcript_var.set(transcripts.setdefault(turn.session_id, []))
             try:
                 turn.t0 = time.perf_counter()
-                turn.working_set = (
-                    await ragu.full_working_set()
-                    if turn.full_corpus
-                    else await ragu.retrieve(turn.message)
+                # None => server default (L1 off / full-corpus, per config).
+                full_corpus = (
+                    ragu.full_corpus_default if turn.full_corpus is None else turn.full_corpus
                 )
+                if full_corpus:
+                    turn.working_set = await ragu.full_working_set()
+                else:
+                    # Conversation-aware retrieval: on a follow-up, retrieve over
+                    # the prior (question, answer) plus the new message so a
+                    # resolved intermediate hop ("English Channel") pulls in the
+                    # next hop's evidence. Accumulate with last turn's working set
+                    # so earlier evidence is never dropped.
+                    prev = last_qa.get(turn.session_id)
+                    retrieval_text = (
+                        f"{prev[0]}\n{prev[1]}\n{turn.message}" if prev else turn.message
+                    )
+                    turn.working_set = await ragu.retrieve(
+                        retrieval_text, prior=working_sets.get(turn.session_id)
+                    )
+                # Pass the assembled set straight to L2 (don't re-retrieve from
+                # the bare message, which would discard the conversation context).
                 turn.result = await ragu.answer(
                     turn.message,
                     ground=True,
                     grounding_source=turn.grounding_source,
-                    full_corpus=turn.full_corpus,
+                    full_corpus=full_corpus,
+                    working_set=turn.working_set,
                 )
                 turn.elapsed_ms = int((time.perf_counter() - turn.t0) * 1000)
+                # Remember this turn for the next follow-up's retrieval + accumulation.
+                working_sets[turn.session_id] = turn.working_set
+                last_qa[turn.session_id] = (turn.message, turn.result.text)
                 turn.events.put(("done", None))
             except Exception as exc:  # surface to the awaiting HTTP handler
                 logger.exception("turn failed for session %s", turn.session_id)
@@ -222,6 +272,7 @@ def create_app() -> "FastAPI":  # type: ignore[name-defined]  # noqa: F821
         assert turn.result is not None and turn.working_set is not None
         return {
             "session_id": turn.session_id,
+            "reasoning_log": list(turn.trace_log),
             **_answer_json(turn.result, turn.working_set, turn.elapsed_ms),
         }
 
@@ -244,41 +295,23 @@ def create_app() -> "FastAPI":  # type: ignore[name-defined]  # noqa: F821
         return await _pump(turn)
 
     @app.get("/api/trace")
-    async def trace(session_id: str = Query(...)) -> "Response":  # type: ignore[name-defined]  # noqa: F821
-        """Server-sent events: stream L2's reasoning log for a session's in-flight
-        turn. Each ``data:`` line is one trajectory step; an ``end`` event closes
-        the stream when the turn finishes. Polls the turn's log list (250 ms) and
-        replays from the start, so a late or reconnecting client misses nothing."""
-        from fastapi.responses import StreamingResponse
+    async def trace(session_id: str = Query(...), after: int = Query(0, ge=0)) -> dict:
+        """Poll L2's reasoning log for a session's in-flight turn. Returns the log
+        lines after index ``after`` (so the client only fetches what's new) plus
+        ``finished``. A short-poll endpoint, not a persistent connection — robust
+        behind dev proxies and immune to per-origin connection limits.
 
-        # The trace SSE may race the /api/chat POST that creates the turn — wait
-        # briefly for it to appear before giving up.
+        Once a turn completes it's removed from ``turns``; the authoritative full
+        log then rides back with the answer (``reasoning_log``), so a missed final
+        poll loses nothing."""
         turn = turns.get(session_id)
-        for _ in range(50):
-            if turn is not None:
-                break
-            await asyncio.sleep(0.1)
-            turn = turns.get(session_id)
-
-        async def gen():
-            if turn is None:
-                yield "event: end\ndata: {}\n\n"
-                return
-            i = 0
-            while True:
-                while i < len(turn.trace_log):
-                    yield f"data: {json.dumps({'line': turn.trace_log[i]})}\n\n"
-                    i += 1
-                if turn.finished:
-                    yield "event: end\ndata: {}\n\n"
-                    return
-                await asyncio.sleep(0.25)
-
-        return StreamingResponse(
-            gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        if turn is None:
+            return {"lines": [], "next": after, "finished": True}
+        return {
+            "lines": turn.trace_log[after:],
+            "next": len(turn.trace_log),
+            "finished": turn.finished,
+        }
 
     @app.post("/api/respond")
     async def respond(req: RespondRequest) -> dict:
@@ -293,6 +326,9 @@ def create_app() -> "FastAPI":  # type: ignore[name-defined]  # noqa: F821
         """End a session. If a turn is mid-question, unblock the worker so it can
         finish and release the lock instead of stranding it forever."""
         turn = turns.pop(req.session_id, None)
+        transcripts.pop(req.session_id, None)  # forget the conversation history
+        working_sets.pop(req.session_id, None)  # and the accumulated evidence
+        last_qa.pop(req.session_id, None)  # and the conversation-aware retrieval context
         if turn is not None:
             turn.replies.put(_CANCELLED)
             if turn.task is not None:

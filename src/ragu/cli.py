@@ -69,9 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_answer.add_argument(
         "--full-corpus",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="skip L1 retrieval: L2 reasons over every indexed document "
-        "(needs vomero handoff='corpus')",
+        "(needs vomero handoff='corpus'). Use --no-full-corpus to force the "
+        "L1+L2 pipeline. Default: RAGU_VOMERO__FULL_CORPUS (on).",
     )
 
     p_extract = sub.add_parser(

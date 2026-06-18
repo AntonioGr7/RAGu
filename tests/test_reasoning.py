@@ -107,10 +107,14 @@ class FakeEngine:
         return_trajectory: bool = False,
         on_event: Any = None,
         ask_handler: Any = None,
+        history: Any = None,
+        transcript_sink: Any = None,
     ) -> FakeRunResult:
         self._captured["question"] = question
         self._captured["source"] = source
         self._captured["ask_handler"] = ask_handler
+        self._captured["history"] = history
+        self._captured["transcript_sink"] = transcript_sink
         return FakeRunResult(
             answer="The total is 1250.",
             trajectory=[FakeStep(code="corpus.read('invoices/inv1.pdf.txt')")],

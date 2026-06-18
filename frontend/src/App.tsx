@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Citation,
+  fetchTrace,
   GroundingSource,
   listDocuments,
   resetSession,
   respond,
   sendMessage,
-  traceStreamUrl,
 } from "./api";
 import { ChatThread, ChatMessage } from "./components/ChatThread";
 import { Composer } from "./components/Composer";
@@ -24,7 +24,9 @@ export function App() {
   const [sessionId, setSessionId] = useState(newSessionId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [grounding, setGrounding] = useState<GroundingSource>("trajectory");
-  const [fullCorpus, setFullCorpus] = useState(false);
+  // L1 off by default: L2 reasons over the whole corpus (matches the server's
+  // RAGU_VOMERO__FULL_CORPUS default). Uncheck to use the L1+L2 retrieval pipeline.
+  const [fullCorpus, setFullCorpus] = useState(true);
   const [pending, setPending] = useState(false);
   // True while L2 is waiting on the user — the composer answers the question.
   const [awaitingQuestion, setAwaitingQuestion] = useState(false);
@@ -34,43 +36,52 @@ export function App() {
   // The answer message whose references the right panel shows (defaults to the
   // latest). Tracked by message id so the focused bubble can be highlighted.
   const [activeId, setActiveId] = useState<string | null>(null);
-  // L2's reasoning log for the in-flight turn, streamed over SSE. Mirrored in a
-  // ref so it can be snapshotted onto the answer message when the turn ends.
+  // L2's reasoning log for the in-flight turn, refreshed by polling. Mirrored in
+  // a ref so it can be snapshotted if the answer arrives mid-poll.
   const [liveTrace, setLiveTrace] = useState<string[]>([]);
   const liveTraceRef = useRef<string[]>([]);
-  const esRef = useRef<EventSource | null>(null);
+  const pollingRef = useRef(false);
+  const cursorRef = useRef(0);
 
   useEffect(() => {
     listDocuments()
       .then((d) => setDocCount(d.length))
       .catch(() => setDocCount(null));
-    return () => esRef.current?.close();
+    return () => {
+      pollingRef.current = false;
+    };
   }, []);
 
-  const closeStream = () => {
-    esRef.current?.close();
-    esRef.current = null;
+  const stopPolling = () => {
+    pollingRef.current = false;
   };
 
-  // Open a fresh trace stream for a new turn (a continuation/respond keeps the
-  // existing one — the same turn's log keeps growing on the server).
-  const openStream = () => {
-    closeStream();
+  // Poll the reasoning log while a turn is in flight. Lightweight short requests
+  // (no persistent connection) — survives the ask-back pause until `finished`.
+  const startPolling = () => {
     liveTraceRef.current = [];
     setLiveTrace([]);
-    const es = new EventSource(traceStreamUrl(sessionId));
-    es.onmessage = (e) => {
+    cursorRef.current = 0;
+    pollingRef.current = true;
+    const tick = async () => {
+      if (!pollingRef.current) return;
       try {
-        const { line } = JSON.parse(e.data);
-        liveTraceRef.current = [...liveTraceRef.current, line];
-        setLiveTrace(liveTraceRef.current);
+        const d = await fetchTrace(sessionId, cursorRef.current);
+        if (d.lines.length) {
+          cursorRef.current = d.next;
+          liveTraceRef.current = [...liveTraceRef.current, ...d.lines];
+          setLiveTrace(liveTraceRef.current);
+        }
+        if (d.finished) {
+          pollingRef.current = false;
+          return;
+        }
       } catch {
-        /* ignore malformed frame */
+        /* transient — keep polling */
       }
+      if (pollingRef.current) setTimeout(tick, 400);
     };
-    es.addEventListener("end", closeStream);
-    es.onerror = closeStream;
-    esRef.current = es;
+    void tick();
   };
 
   const push = (m: ChatMessage) => setMessages((prev) => [...prev, m]);
@@ -82,11 +93,13 @@ export function App() {
       setAwaitingQuestion(true);
     } else {
       const id = nextId();
-      // Snapshot the reasoning log onto the answer so it stays inspectable.
-      push({ id, role: "assistant", turn, trace: [...liveTraceRef.current] });
+      // The answer carries the authoritative full log; fall back to what we
+      // polled if it's somehow absent.
+      const log = turn.reasoning_log ?? liveTraceRef.current;
+      push({ id, role: "assistant", turn, trace: [...log] });
       setActiveId(id);
       setAwaitingQuestion(false);
-      closeStream();
+      stopPolling();
     }
   };
 
@@ -96,7 +109,7 @@ export function App() {
     setPending(true);
     const answering = awaitingQuestion;
     setAwaitingQuestion(false);
-    if (!answering) openStream();
+    if (!answering) startPolling();
     try {
       const turn = answering
         ? await respond(sessionId, text)
@@ -104,14 +117,14 @@ export function App() {
       consume(turn);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      closeStream();
+      stopPolling();
     } finally {
       setPending(false);
     }
   };
 
   const newChat = () => {
-    closeStream();
+    stopPolling();
     resetSession(sessionId);
     setSessionId(newSessionId());
     setMessages([]);

@@ -162,6 +162,24 @@ class VomeroSettings(BaseModel):
     # and is what enables document-level citations.
     handoff: str = "corpus"
 
+    # Skip L1 retrieval by default: hand vomero the *entire* indexed corpus and
+    # let it navigate (grep/read/recurse) over everything, rather than a
+    # retrieved working set. On by default — L2 does its own retrieval, so dense
+    # L1 never becomes the recall ceiling (notably for multi-hop questions whose
+    # final-hop evidence isn't near the raw query). Requires handoff="corpus"
+    # (the whole corpus can't be inlined into the prompt). Set False to restore
+    # the L1+L2 pipeline. Callers may still override per-request.
+    full_corpus: bool = True
+
+    # Persistent lexical search index (vomero's PersistentIndex: SQLite FTS5)
+    # backing L2's ``corpus.search()`` primitive — ranked BM25 relevance instead
+    # of only literal grep, which closes the recall gap on multi-hop questions.
+    # Built once from the indexed corpus and opened read-only while serving, so
+    # the first query isn't slow. Empty => derive a default next to the LanceDB
+    # store (``<lancedb_uri>/.vomero-search``); set ``"off"`` to disable and fall
+    # back to grep-only navigation.
+    search_index_dir: str = ""
+
     # Optional post-answer grounding pass: a cheap LLM call (via the chat-model
     # port) extracts verbatim supporting quotes and resolves them to page + word
     # boxes (inline citations). Off by default — it costs one extra LLM call, so

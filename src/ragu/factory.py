@@ -133,7 +133,28 @@ def build_reasoning_engine(settings: RaguSettings) -> ReasoningEngine:
     vomero — that happens lazily on first use, so this is import-safe."""
     from ragu.adapters.reasoning import VomeroReasoningEngine
 
-    return VomeroReasoningEngine(settings.vomero)
+    return VomeroReasoningEngine(
+        settings.vomero, search_index_dir=_resolve_search_index_dir(settings)
+    )
+
+
+def _resolve_search_index_dir(settings: RaguSettings) -> str | None:
+    """Where L2's persistent lexical search index lives, or ``None`` to disable.
+
+    Explicit ``RAGU_VOMERO__SEARCH_INDEX_DIR`` wins (``"off"`` disables it).
+    Otherwise default to a folder next to the LanceDB store so the index travels
+    with the corpus it indexes; with the in-memory store there is nothing
+    persistent to sit beside, so search falls back to a lazy in-memory index."""
+    configured = settings.vomero.search_index_dir.strip()
+    if configured.lower() == "off":
+        return None
+    if configured:
+        return configured
+    if settings.storage.backend == "lance":
+        from pathlib import Path
+
+        return str(Path(settings.storage.lancedb_uri) / ".vomero-search")
+    return None
 
 
 def build_retriever(settings: RaguSettings, embedder: Embedder, store: VectorStore) -> Retriever:

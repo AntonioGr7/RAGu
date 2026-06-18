@@ -34,6 +34,7 @@ export interface AnswerTurn {
   citations: Citation[];
   working_set: WorkingDoc[];
   elapsed_ms: number;
+  reasoning_log: string[]; // L2's full step-by-step log for this answer
 }
 
 // L2 paused mid-reasoning to ask the user something.
@@ -90,9 +91,18 @@ export async function resetSession(sessionId: string): Promise<void> {
   }).catch(() => {});
 }
 
-// SSE endpoint streaming L2's live reasoning log for a session's in-flight turn.
-export function traceStreamUrl(sessionId: string): string {
-  return `/api/trace?session_id=${encodeURIComponent(sessionId)}`;
+export interface TracePoll {
+  lines: string[]; // log lines after the requested index
+  next: number; // cursor to pass as `after` on the next poll
+  finished: boolean; // the turn has completed
+}
+
+// Poll L2's reasoning log for a session's in-flight turn (lines after `after`).
+export async function fetchTrace(sessionId: string, after: number): Promise<TracePoll> {
+  const q = new URLSearchParams({ session_id: sessionId, after: String(after) });
+  const res = await fetch(`/api/trace?${q.toString()}`);
+  if (!res.ok) throw new Error(`trace failed: ${res.status}`);
+  return res.json();
 }
 
 export async function listDocuments(): Promise<WorkingDoc[]> {
